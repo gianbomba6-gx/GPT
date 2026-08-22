@@ -1,0 +1,28 @@
+name: Daily rebound scan
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 23:30 Europe/Rome: 21:30 UTC in summer, 22:30 UTC in winter.
+    # GitHub Actions cron is UTC, so run at 21:30 UTC; this is 23:30 CEST.
+    - cron: '30 21 * * 1-5'
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r market_rebound_model/requirements.txt
+      - name: Run rebound scanner
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        working-directory: market_rebound_model/src
+        run: python live_alert.py
