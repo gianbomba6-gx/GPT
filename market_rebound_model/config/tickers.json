@@ -1,0 +1,14 @@
+{
+  "tickers": [
+    {"symbol": "STLAM.MI", "name": "Stellantis", "type": "equity", "market": "Milan"},
+    {"symbol": "SPCX", "name": "SpaceX", "type": "equity", "market": "US"},
+    {"symbol": "NVDA", "name": "NVIDIA", "type": "equity", "market": "US"},
+    {"symbol": "TSLA", "name": "Tesla", "type": "equity", "market": "US"},
+    {"symbol": "^STOXX50E", "name": "Euro Stoxx 50", "type": "benchmark", "market": "Europe"}
+  ],
+  "signal": {
+    "down_day_threshold": -0.02,
+    "alert_probability_threshold": 0.70,
+    "target_return": 0.03
+  }
+}
