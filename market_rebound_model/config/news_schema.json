@@ -1,0 +1,18 @@
+{
+  "news_features": [
+    "news_sentiment",
+    "news_intensity",
+    "news_relevance",
+    "news_novelty",
+    "news_count"
+  ],
+  "categories": [
+    "market", "earnings", "guidance", "analyst", "regulatory", "legal",
+    "m_and_a", "macro", "geopolitical", "product", "insider", "other"
+  ],
+  "cutoff_rule": "Use only information published no later than the signal session close; for next-session prediction, never ingest articles first published after the signal cutoff.",
+  "sentiment_range": [-1, 1],
+  "intensity_range": [0, 1],
+  "relevance_range": [0, 1],
+  "novelty_range": [0, 1]
+}
