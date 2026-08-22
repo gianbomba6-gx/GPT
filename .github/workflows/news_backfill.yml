@@ -1,0 +1,50 @@
+name: News backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: 'Historical start date (YYYY-MM-DD)'
+        required: false
+        default: '2020-01-01'
+      end_date:
+        description: 'Historical end date (YYYY-MM-DD, blank = today)'
+        required: false
+        default: ''
+
+jobs:
+  backfill-news:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run historical news backfill
+        env:
+          ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+        run: |
+          python src/news_backfill_runner.py \
+            --start-date "$START_DATE" \
+            ${END_DATE:+--end-date "$END_DATE"}
+
+      - name: Upload news datasets
+        uses: actions/upload-artifact@v4
+        with:
+          name: historical-news-dataset
+          path: |
+            market_rebound_model/results/news_raw.csv
+            market_rebound_model/results/news_daily.csv
+          if-no-files-found: warn
