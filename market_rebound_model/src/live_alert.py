@@ -1,11 +1,8 @@
 """Daily Yahoo Finance rebound scanner with Discord alerts.
 
-The live scanner uses a pooled cross-ticker expanding-window model. This is
-important for short-history instruments such as SPCX: they contribute to the
-training set but do not require an independent 500-observation history.
-
-Only completed daily bars are scored. The latest bar is scored by a model
-trained exclusively on observations from earlier calendar years.
+The live scanner uses a pooled cross-ticker expanding-window model and adds
+Euro Stoxx 50 market-regime features to distinguish idiosyncratic selloffs
+from broad market selloffs.
 """
 from __future__ import annotations
 import json, os
@@ -19,6 +16,7 @@ from rebound_model import load_yahoo_ohlcv, BASE_FEATURES
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = json.loads((ROOT / "config" / "tickers.json").read_text())
 TARGET = "target_3"
+REGIME_FEATURES = ["mkt_ret", "mkt_ret_5", "mkt_ret_20", "mkt_vol_20", "rel_ret_1", "rel_ret_5", "rel_ret_20"]
 
 
 def fetch(symbol: str, period: str = "10y") -> pd.DataFrame:
@@ -40,15 +38,31 @@ def discord(message: str) -> None:
     r.raise_for_status()
 
 
-def pooled_walk_forward_predict(frames: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
-    """Return latest-row probabilities using a pooled expanding-window model."""
+def add_market_regime(frames: dict[str, pd.DataFrame], benchmark: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    b = benchmark[["Date", "Ultimo"]].copy().sort_values("Date")
+    b["mkt_ret"] = b["Ultimo"].pct_change()
+    b["mkt_ret_5"] = b["Ultimo"].pct_change(5)
+    b["mkt_ret_20"] = b["Ultimo"].pct_change(20)
+    b["mkt_vol_20"] = b["mkt_ret"].rolling(20).std()
+    b = b.drop(columns=["Ultimo"])
+    out = {}
+    for symbol, d in frames.items():
+        z = pd.merge_asof(d.sort_values("Date"), b, on="Date", direction="backward")
+        z["rel_ret_1"] = z["ret"] - z["mkt_ret"]
+        z["rel_ret_5"] = z["ret_5"] - z["mkt_ret_5"]
+        z["rel_ret_20"] = z["ret_20"] - z["mkt_ret_20"]
+        out[symbol] = z
+    return out
+
+
+def pooled_walk_forward_predict(frames: dict[str, pd.DataFrame]) -> dict[str, pd.Series]:
     rows = []
     for symbol, d in frames.items():
         z = d.copy()
         z["symbol"] = symbol
         rows.append(z)
     all_data = pd.concat(rows, ignore_index=True)
-    features = BASE_FEATURES
+    features = BASE_FEATURES + REGIME_FEATURES
     trainable = all_data.dropna(subset=features + [TARGET]).copy()
     latest_by_symbol = {s: d.iloc[-1].copy() for s, d in frames.items()}
     years = sorted(trainable.Date.dt.year.unique())
@@ -64,8 +78,7 @@ def pooled_walk_forward_predict(frames: dict[str, pd.DataFrame]) -> dict[str, pd
     for symbol, latest in latest_by_symbol.items():
         if latest[features].isna().any():
             continue
-        latest_df = pd.DataFrame([latest])
-        latest["probability"] = float(model.predict_proba(latest_df[features])[:, 1][0])
+        latest["probability"] = float(model.predict_proba(pd.DataFrame([latest])[features])[:, 1][0])
         result[symbol] = latest
     return result
 
@@ -75,18 +88,24 @@ def main() -> int:
     threshold = CONFIG["signal"]["alert_probability_threshold"]
     down_threshold = CONFIG["signal"]["down_day_threshold"]
     frames: dict[str, pd.DataFrame] = {}
+    benchmark_symbol = next(x["symbol"] for x in CONFIG["tickers"] if x["type"] == "benchmark")
     for item in CONFIG["tickers"]:
-        if item["type"] == "benchmark":
-            continue
         symbol = item["symbol"]
         try:
-            frames[symbol] = load_yahoo_ohlcv(fetch(symbol))
-            print(f"DATA {symbol}: {len(frames[symbol])} rows, latest={frames[symbol].iloc[-1]['Date'].date()}")
+            raw = load_yahoo_ohlcv(fetch(symbol))
+            if item["type"] == "benchmark":
+                benchmark = raw
+            else:
+                frames[symbol] = raw
+                print(f"DATA {symbol}: {len(raw)} rows, latest={raw.iloc[-1]['Date'].date()}")
         except Exception as exc:
             print(f"ERROR {symbol}: {exc}")
     if not frames:
         raise RuntimeError("No ticker data could be downloaded")
+    if "benchmark" not in locals():
+        raise RuntimeError(f"No benchmark data for {benchmark_symbol}")
 
+    frames = add_market_regime(frames, benchmark)
     predictions = pooled_walk_forward_predict(frames)
     for item in CONFIG["tickers"]:
         if item["type"] == "benchmark":
@@ -98,7 +117,7 @@ def main() -> int:
         latest = predictions[symbol]
         probability = latest["probability"]
         ret = float(latest["ret"])
-        print(f"CHECK {symbol}: date={latest['Date'].date()} ret={ret:.2%} model_p={probability:.1%}")
+        print(f"CHECK {symbol}: date={latest['Date'].date()} ret={ret:.2%} model_p={probability:.1%} mkt_1d={latest['mkt_ret']:.2%} rel_1d={latest['rel_ret_1']:.2%}")
         if ret <= down_threshold and probability >= threshold:
             alerts.append(
                 f"🚨 **REBOUND SIGNAL — {symbol} ({item['name']})**\n"
@@ -106,7 +125,8 @@ def main() -> int:
                 f"Daily move: {ret:.2%}\n"
                 f"P(next-day +3%): **{probability:.1%}**\n"
                 f"Volume ratio: {latest['vol_ratio']:.2f}x\n"
-                f"20d drawdown: {latest['dd_20']:.2%}"
+                f"20d drawdown: {latest['dd_20']:.2%}\n"
+                f"Market 1d: {latest['mkt_ret']:.2%} | Relative: {latest['rel_ret_1']:.2%}"
             )
     if alerts:
         discord("\n\n".join(alerts))
@@ -114,7 +134,6 @@ def main() -> int:
     else:
         print("No qualifying rebound signals.")
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())
