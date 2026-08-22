@@ -51,14 +51,16 @@ def load_market_csv(path: str | Path) -> pd.DataFrame:
         if c not in raw.columns:
             raise ValueError(f"Missing column in historical CSV: {c}")
         raw[c] = _italian_num(raw[c])
-    raw = raw.rename(columns={"Data": "Date"})
-    return engineer_features(raw)
+    return engineer_features(raw.rename(columns={"Data": "Date"}))
 
 def load_yahoo_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     return engineer_features(df)
 
+def _feature_columns(df: pd.DataFrame):
+    return BASE_FEATURES + [c for c in NEWS_FEATURES if c in df.columns]
+
 def walk_forward_score(df: pd.DataFrame, target: str = "target_3", signal_return: float = -.02):
-    features = BASE_FEATURES + [c for c in NEWS_FEATURES if c in df.columns]
+    features = _feature_columns(df)
     x = df.dropna(subset=features + [target]).copy()
     predictions = []
     for year in sorted(x.Date.dt.year.unique()):
@@ -72,6 +74,18 @@ def walk_forward_score(df: pd.DataFrame, target: str = "target_3", signal_return
         test["signal"] = test["ret"] <= signal_return
         predictions.append(test)
     return (pd.concat(predictions, ignore_index=True) if predictions else pd.DataFrame()), features
+
+def predict_latest(df: pd.DataFrame, target: str = "target_3") -> tuple[float, list[str]]:
+    """Train only on rows whose next-day outcome is known, then score the latest row."""
+    features = _feature_columns(df)
+    x = df.copy()
+    train = x.dropna(subset=features + [target]).copy()
+    latest = x.dropna(subset=features).iloc[-1:]
+    if latest.empty or len(train) < 500:
+        raise ValueError("Insufficient history for latest prediction")
+    model = HistGradientBoostingClassifier(max_iter=250, max_leaf_nodes=15, learning_rate=.05, l2_regularization=2, random_state=42)
+    model.fit(train[features], train[target].astype(int))
+    return float(model.predict_proba(latest[features])[:, 1][0]), features
 
 def report(scored: pd.DataFrame) -> dict:
     s = scored[scored.signal].copy()
