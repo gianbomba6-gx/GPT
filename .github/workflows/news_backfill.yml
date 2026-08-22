@@ -36,9 +36,15 @@ jobs:
           START_DATE: ${{ inputs.start_date }}
           END_DATE: ${{ inputs.end_date }}
         run: |
-          python src/news_backfill_runner.py \
-            --start-date "$START_DATE" \
-            ${END_DATE:+--end-date "$END_DATE"}
+          args=(--start "$START_DATE")
+          if [ -n "$END_DATE" ]; then
+            args+=(--end "$END_DATE")
+          fi
+          python src/news_backfill_runner.py "${args[@]}"
+
+      - name: Aggregate daily news dataset
+        run: |
+          python src/news_backfill.py results/news_raw.csv --out results/news_daily.csv
 
       - name: Upload news datasets
         uses: actions/upload-artifact@v4
