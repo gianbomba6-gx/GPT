@@ -6,11 +6,16 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier
 
-BASE_FEATURES = ["ret", "gap", "range", "close_loc", "recovery_from_low", "vol_ratio", "ret_3", "dd_3", "vol_3", "ret_5", "dd_5", "vol_5", "ret_10", "dd_10", "vol_10", "ret_20", "dd_20", "vol_20", "ret_60", "dd_60", "vol_60"]
+# Keep the live feature horizon at 20 sessions so instruments with short
+# post-listing histories (e.g. SPCX) can still be scored. Longer horizons can
+# be added later as optional features when enough history exists.
+BASE_FEATURES = ["ret", "gap", "range", "close_loc", "recovery_from_low", "vol_ratio", "ret_3", "dd_3", "vol_3", "ret_5", "dd_5", "vol_5", "ret_10", "dd_10", "vol_10", "ret_20", "dd_20", "vol_20"]
 NEWS_FEATURES = ["news_sentiment", "news_intensity", "news_relevance", "news_novelty", "news_count"]
+
 
 def _italian_num(s: pd.Series) -> pd.Series:
     return pd.to_numeric(s.astype(str).str.replace(".", "", regex=False).str.replace(",", ".", regex=False).str.replace("%", "", regex=False).str.replace("M", "", regex=False), errors="coerce")
+
 
 def prepare_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
@@ -23,6 +28,7 @@ def prepare_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
         d[c] = pd.to_numeric(d[c], errors="coerce")
     return d.dropna(subset=required).sort_values("Date").reset_index(drop=True)
 
+
 def engineer_features(d: pd.DataFrame, keep_targets: bool = True) -> pd.DataFrame:
     d = prepare_ohlcv(d)
     d["ret"] = d["Ultimo"].pct_change()
@@ -32,7 +38,7 @@ def engineer_features(d: pd.DataFrame, keep_targets: bool = True) -> pd.DataFram
     d["recovery_from_low"] = d["Ultimo"] / d["Minimo"] - 1
     d["vol20"] = d["Vol."].rolling(20).mean()
     d["vol_ratio"] = d["Vol."] / d["vol20"]
-    for w in [3, 5, 10, 20, 60]:
+    for w in [3, 5, 10, 20]:
         d[f"ret_{w}"] = d["Ultimo"].pct_change(w)
         d[f"dd_{w}"] = d["Ultimo"] / d["Ultimo"].rolling(w).max() - 1
         d[f"vol_{w}"] = d["ret"].rolling(w).std()
@@ -45,6 +51,7 @@ def engineer_features(d: pd.DataFrame, keep_targets: bool = True) -> pd.DataFram
         d["target_high_3"] = np.where(d["next_high"].notna(), (d["next_high"] >= .03).astype(int), np.nan)
     return d
 
+
 def load_market_csv(path: str | Path) -> pd.DataFrame:
     raw = pd.read_csv(path)
     for c in ["Ultimo", "Apertura", "Massimo", "Minimo", "Var. %", "Vol."]:
@@ -53,11 +60,14 @@ def load_market_csv(path: str | Path) -> pd.DataFrame:
         raw[c] = _italian_num(raw[c])
     return engineer_features(raw.rename(columns={"Data": "Date"}))
 
+
 def load_yahoo_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     return engineer_features(df)
 
+
 def _feature_columns(df: pd.DataFrame):
     return BASE_FEATURES + [c for c in NEWS_FEATURES if c in df.columns]
+
 
 def walk_forward_score(df: pd.DataFrame, target: str = "target_3", signal_return: float = -.02):
     features = _feature_columns(df)
@@ -75,17 +85,29 @@ def walk_forward_score(df: pd.DataFrame, target: str = "target_3", signal_return
         predictions.append(test)
     return (pd.concat(predictions, ignore_index=True) if predictions else pd.DataFrame()), features
 
-def predict_latest(df: pd.DataFrame, target: str = "target_3") -> tuple[float, list[str]]:
-    """Train only on rows whose next-day outcome is known, then score the latest row."""
+
+def predict_latest(df: pd.DataFrame, target: str = "target_3", train_before_latest_year: bool = True) -> tuple[float, list[str]]:
+    """Train on known outcomes and score the latest available completed bar."""
     features = _feature_columns(df)
     x = df.copy()
     train = x.dropna(subset=features + [target]).copy()
     latest = x.dropna(subset=features).iloc[-1:]
-    if latest.empty or len(train) < 500:
+    if latest.empty:
+        raise ValueError("No row has complete features")
+    # If possible, avoid using any observations from the current year so that
+    # the live prediction has the same conservative temporal separation as
+    # the walk-forward backtest.
+    if train_before_latest_year:
+        cutoff_year = int(latest["Date"].dt.year.iloc[0])
+        prior = train[train.Date.dt.year < cutoff_year]
+        if len(prior) >= 500:
+            train = prior
+    if len(train) < 500:
         raise ValueError("Insufficient history for latest prediction")
     model = HistGradientBoostingClassifier(max_iter=250, max_leaf_nodes=15, learning_rate=.05, l2_regularization=2, random_state=42)
     model.fit(train[features], train[target].astype(int))
     return float(model.predict_proba(latest[features])[:, 1][0]), features
+
 
 def report(scored: pd.DataFrame) -> dict:
     s = scored[scored.signal].copy()
