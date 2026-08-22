@@ -1,0 +1,27 @@
+name: Rebound backtest
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 8 * * 6'
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r market_rebound_model/requirements.txt
+      - name: Run walk-forward backtest
+        working-directory: market_rebound_model/src
+        run: python backtest_report.py
+      - name: Upload backtest results
+        uses: actions/upload-artifact@v4
+        with:
+          name: rebound-backtest-results
+          path: market_rebound_model/results/latest_*.csv
