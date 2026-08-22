@@ -21,12 +21,21 @@ class AlphaVantageNewsProvider(NewsProvider):
             raise RuntimeError("ALPHAVANTAGE_API_KEY is required")
         self.timeout = timeout
 
+    @staticmethod
+    def _utc_timestamp(value: datetime) -> pd.Timestamp:
+        ts = pd.Timestamp(value)
+        if ts.tzinfo is None:
+            return ts.tz_localize("UTC")
+        return ts.tz_convert("UTC")
+
     def fetch(self, query: NewsQuery) -> pd.DataFrame:
+        start = self._utc_timestamp(query.start)
+        end = self._utc_timestamp(query.end)
         params = {
             "function": "NEWS_SENTIMENT",
             "tickers": query.symbol,
-            "time_from": pd.Timestamp(query.start, tz="UTC").strftime("%Y%m%dT%H%M"),
-            "time_to": pd.Timestamp(query.end, tz="UTC").strftime("%Y%m%dT%H%M"),
+            "time_from": start.strftime("%Y%m%dT%H%M"),
+            "time_to": end.strftime("%Y%m%dT%H%M"),
             "sort": "EARLIEST",
             "limit": 1000,
             "apikey": self.api_key,
