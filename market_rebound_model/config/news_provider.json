@@ -1,0 +1,9 @@
+{
+  "provider": "pending",
+  "symbols": ["STLAM.MI", "SPCX", "NVDA", "TSLA"],
+  "historical_window": "full_available_history",
+  "required_timestamp_precision": "datetime_utc",
+  "cutoff": "signal_session_close",
+  "allow_post_cutoff_articles": false,
+  "raw_articles_retained": true
+}
