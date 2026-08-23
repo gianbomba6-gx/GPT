@@ -39,7 +39,6 @@ def _canonical_row(org):
     row = [""] * len(GKG_COLUMNS)
     row[0] = "20260820153000-1"
     row[1] = "20260820153000"
-    # GKG SourceCommonName is the human-readable/domain source field.
     row[3] = "example.com"
     row[4] = "https://example.com/article"
     row[8] = "ECON_STOCKMARKET;ECON_TECH"
@@ -62,15 +61,14 @@ def test_gkg_filters_organization_and_parses_tone():
     assert provider.session.calls == 1
 
 
-def test_gkg_rejects_noncanonical_row_width():
-    # Daily GDELT news files use the official 27-column GKG 2.1 schema.
+def test_gkg_rejects_noncanonical_row_width_with_clear_error():
     row = [""] * 11
     provider = GkgHistoricalProvider()
     provider.session = FakeSession(_zip_payload([row]))
     try:
         provider.fetch_day("NVDA", date(2026, 8, 20))
-    except Exception as exc:
-        assert "ParserError" in type(exc).__name__ or "columns" in str(exc).lower()
+    except RuntimeError as exc:
+        assert "expected 27, found 11" in str(exc)
     else:
         raise AssertionError("Expected non-canonical GKG fixture to be rejected")
 
