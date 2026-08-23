@@ -51,7 +51,7 @@ def load_news(path: str | Path) -> pd.DataFrame:
     d = pd.read_csv(p)
     if d.empty:
         return pd.DataFrame(columns=["Date", "symbol", *NEWS_FEATURES])
-    d["Date"] = pd.to_datetime(d["Date"], errors="coerce").dt.normalize()
+    d["Date"] = pd.to_datetime(d["Date"], errors="coerce", utc=True).dt.tz_convert(None).dt.normalize()
     d["symbol"] = d["symbol"].astype(str).str.upper().str.strip()
     for c in NEWS_FEATURES:
         if c in d.columns:
@@ -61,16 +61,21 @@ def load_news(path: str | Path) -> pd.DataFrame:
     return d.dropna(subset=["Date", "symbol"])
 
 
+def _normalize_merge_date(values: pd.Series) -> pd.Series:
+    """Return timezone-naive datetime64[ns] calendar dates for pandas asof/joins."""
+    return pd.to_datetime(values, errors="coerce", utc=True).dt.tz_convert(None).dt.normalize().astype("datetime64[ns]")
+
+
 def merge_news(market: pd.DataFrame, news: pd.DataFrame, symbol: str) -> pd.DataFrame:
     """Merge news to the first market session on/after its availability date."""
     x = market.copy()
-    x["Date"] = pd.to_datetime(x["Date"], errors="coerce").dt.normalize()
+    x["Date"] = _normalize_merge_date(x["Date"])
     x = x.sort_values("Date")
 
     n = news[news.symbol == symbol].copy()
     cols = ["Date", "symbol"] + [c for c in NEWS_FEATURES if c in n.columns]
     n = n[cols].drop_duplicates(["Date", "symbol"])
-    n["available_date"] = pd.to_datetime(n["Date"], errors="coerce").dt.normalize()
+    n["available_date"] = _normalize_merge_date(n["Date"])
     n = n.dropna(subset=["available_date"]).sort_values("available_date")
 
     if not n.empty:
@@ -86,6 +91,7 @@ def merge_news(market: pd.DataFrame, news: pd.DataFrame, symbol: str) -> pd.Data
         agg_spec = {c: ("sum" if c == "news_count" else "mean") for c in agg_cols}
         mapped = mapped.groupby("session_date", as_index=False).agg(agg_spec)
         mapped = mapped.rename(columns={"session_date": "Date"})
+        mapped["Date"] = _normalize_merge_date(mapped["Date"])
         x = x.merge(mapped, on="Date", how="left")
 
     for c in NEWS_FEATURES:
