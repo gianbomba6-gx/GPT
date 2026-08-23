@@ -2,19 +2,6 @@ name: News V2 historical backfill
 
 on:
   workflow_dispatch:
-    inputs:
-      start_date:
-        description: 'First market date (YYYY-MM-DD)'
-        required: false
-        default: '2020-01-01'
-      end_date:
-        description: 'Last confirmed GDELT date (YYYY-MM-DD)'
-        required: false
-        default: '2026-08-19'
-      threshold:
-        description: 'Candidate down-day threshold'
-        required: false
-        default: '-0.02'
   push:
     paths:
       - 'market_rebound_model/src/gkg_candidate_backfill.py'
@@ -35,17 +22,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  backfill:
+  tests:
+    name: Deterministic V2 tests
     runs-on: ubuntu-latest
-    timeout-minutes: 360
     defaults:
       run:
         working-directory: market_rebound_model
-    env:
-      START_DATE: '2020-01-01'
-      END_DATE: '2026-08-19'
-      THRESHOLD: '-0.02'
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -59,20 +41,6 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt pytest
 
-      - name: Resolve range
-        id: range
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "start=${{ inputs.start_date }}" >> "$GITHUB_OUTPUT"
-            echo "end=${{ inputs.end_date }}" >> "$GITHUB_OUTPUT"
-            echo "threshold=${{ inputs.threshold }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "start=${START_DATE}" >> "$GITHUB_OUTPUT"
-            echo "end=${END_DATE}" >> "$GITHUB_OUTPUT"
-            echo "threshold=${THRESHOLD}" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Run deterministic tests
         run: |
           python -m pytest -q \
@@ -81,21 +49,61 @@ jobs:
             tests/test_news_event_classifier.py \
             tests/test_news_v2_integration.py
 
+  yearly_backfill:
+    name: GKG backfill ${{ matrix.year }}
+    needs: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - {year: 2020, start: '2020-01-01', end: '2020-12-31'}
+          - {year: 2021, start: '2021-01-01', end: '2021-12-31'}
+          - {year: 2022, start: '2022-01-01', end: '2022-12-31'}
+          - {year: 2023, start: '2023-01-01', end: '2023-12-31'}
+          - {year: 2024, start: '2024-01-01', end: '2024-12-31'}
+          - {year: 2025, start: '2025-01-01', end: '2025-12-31'}
+          - {year: 2026, start: '2026-01-01', end: '2026-08-19'}
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    env:
+      THRESHOLD: '-0.02'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
       - name: Backfill candidate-day GKG news
         run: |
           python src/gkg_candidate_backfill.py \
-            --start "${{ steps.range.outputs.start }}" \
-            --end "${{ steps.range.outputs.end }}" \
-            --threshold "${{ steps.range.outputs.threshold }}" \
-            --out-raw results/news_v2_full_raw.csv \
-            --out-daily results/news_v2_full_daily.csv
+            --start "${{ matrix.start }}" \
+            --end "${{ matrix.end }}" \
+            --threshold "${THRESHOLD}" \
+            --out-raw "results/news_v2_${{ matrix.year }}_raw.csv" \
+            --out-daily "results/news_v2_${{ matrix.year }}_daily.csv"
 
-      - name: Validate historical dataset
+      - name: Validate yearly dataset
         run: |
           python - <<'PY'
           import pandas as pd
-          raw = pd.read_csv('results/news_v2_full_raw.csv')
-          daily = pd.read_csv('results/news_v2_full_daily.csv')
+          from pathlib import Path
+
+          year = '${{ matrix.year }}'
+          raw_path = Path(f'results/news_v2_{year}_raw.csv')
+          daily_path = Path(f'results/news_v2_{year}_daily.csv')
+          raw = pd.read_csv(raw_path)
+          daily = pd.read_csv(daily_path)
 
           required_raw = {
               'published_at','symbol','headline','source','url','summary',
@@ -106,24 +114,83 @@ jobs:
               'news_novelty','news_count','negative_news_share','material_event_share',
               'event_polarity','event_intensity','unique_event_types','news_available'
           }
-          missing_raw = required_raw - set(raw.columns)
-          missing_daily = required_daily - set(daily.columns)
-          if missing_raw:
-              raise SystemExit(f'Missing raw columns: {sorted(missing_raw)}')
-          if missing_daily:
-              raise SystemExit(f'Missing daily columns: {sorted(missing_daily)}')
-          if raw.empty or daily.empty:
-              raise SystemExit('Historical GKG dataset is empty')
+          if set(raw.columns) != set(required_raw):
+              raise SystemExit(f'{year}: unexpected raw columns: {sorted(set(raw.columns) ^ required_raw)}')
+          if set(daily.columns) != set(required_daily):
+              raise SystemExit(f'{year}: unexpected daily columns: {sorted(set(daily.columns) ^ required_daily)}')
+          if not raw.empty:
+              expected = {'STLAM.MI','SPCX','NVDA','TSLA'}
+              actual = set(raw['symbol'].dropna().unique())
+              unknown = actual - expected
+              if unknown:
+                  raise SystemExit(f'{year}: unknown symbols: {sorted(unknown)}')
+          print(f'{year}: RAW={len(raw)} DAILY={len(daily)}')
+          PY
+
+      - name: Upload yearly artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: news-v2-year-${{ matrix.year }}
+          path: |
+            market_rebound_model/results/news_v2_${{ matrix.year }}_raw.csv
+            market_rebound_model/results/news_v2_${{ matrix.year }}_daily.csv
+          if-no-files-found: error
+
+  aggregate_and_backtest:
+    name: Aggregate and V1 vs V2 backtest
+    needs: yearly_backfill
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+
+      - name: Download yearly artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: news-v2-year-*
+          path: market_rebound_model/results/yearly
+          merge-multiple: false
+
+      - name: Aggregate historical news dataset
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import pandas as pd
+
+          root = Path('results/yearly')
+          raw_files = sorted(root.glob('*/news_v2_*_raw.csv'))
+          daily_files = sorted(root.glob('*/news_v2_*_daily.csv'))
+          if len(raw_files) != 7 or len(daily_files) != 7:
+              raise SystemExit(f'Expected 7 yearly artifacts, found raw={len(raw_files)} daily={len(daily_files)}')
+
+          raw = pd.concat([pd.read_csv(p) for p in raw_files], ignore_index=True)
+          daily = pd.concat([pd.read_csv(p) for p in daily_files], ignore_index=True)
+          raw = raw.drop_duplicates(subset=['published_at','url','symbol','candidate_day']).sort_values(['candidate_day','symbol','published_at'])
+          daily = daily.drop_duplicates(subset=['Date','symbol']).sort_values(['Date','symbol'])
 
           expected = {'STLAM.MI','SPCX','NVDA','TSLA'}
           actual = set(raw['symbol'].dropna().unique())
-          missing_symbols = expected - actual
-          if missing_symbols:
-              raise SystemExit(f'Missing tracked symbols: {sorted(missing_symbols)}')
+          missing = expected - actual
+          if raw.empty or daily.empty:
+              raise SystemExit('Aggregated historical news dataset is empty')
+          if missing:
+              raise SystemExit(f'Missing tracked symbols: {sorted(missing)}')
 
-          if raw['candidate_day'].isna().any() or raw['published_at'].isna().any():
-              raise SystemExit('Invalid candidate_day/published_at values present')
-
+          raw.to_csv('results/news_v2_full_raw.csv', index=False)
+          daily.to_csv('results/news_v2_full_daily.csv', index=False)
           print(f'RAW={len(raw)} DAILY={len(daily)}')
           print(raw.groupby('symbol').size().to_string())
           print(f"DATE_RANGE={daily['Date'].min()} -> {daily['Date'].max()}")
@@ -153,12 +220,13 @@ jobs:
           if v2.empty or (v2['n'].fillna(0) <= 0).all():
               raise SystemExit('No valid V2 + news observations in historical report')
           print(d.to_string(index=False))
+          print('NEWS V2 HISTORICAL BACKFILL PASS')
           PY
 
-      - name: Upload historical artifacts
+      - name: Upload final historical artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: news-v2-historical-${{ steps.range.outputs.start }}-${{ steps.range.outputs.end }}
+          name: news-v2-historical-final
           path: |
             market_rebound_model/results/news_v2_full_raw.csv
             market_rebound_model/results/news_v2_full_daily.csv
