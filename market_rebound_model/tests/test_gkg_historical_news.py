@@ -39,7 +39,8 @@ def _canonical_row(org):
     row = [""] * len(GKG_COLUMNS)
     row[0] = "20260820153000-1"
     row[1] = "20260820153000"
-    row[3] = "Example News"
+    # GKG SourceCommonName is the human-readable/domain source field.
+    row[3] = "example.com"
     row[4] = "https://example.com/article"
     row[8] = "ECON_STOCKMARKET;ECON_TECH"
     row[13] = org
@@ -55,36 +56,23 @@ def test_gkg_filters_organization_and_parses_tone():
     out = provider.fetch_day("NVDA", date(2026, 8, 20))
     assert len(out) == 1
     assert out.iloc[0]["symbol"] == "NVDA"
-    assert out.iloc[0]["source"] == "Example News"
+    assert out.iloc[0]["source"] == "example.com"
     assert out.iloc[0]["sentiment"] == -2.5
     assert out.iloc[0]["intensity"] == 2.5
     assert provider.session.calls == 1
 
 
-def test_compact_gkg_layout_is_parsed_without_fixed_27_columns():
-    # Compact GKG layout: DATE, URL, source, V2Counts, V2Themes,
-    # V2Locations, V2Persons, V2Organizations, V2Tone, AllNames, Extras.
-    row = [
-        "20260820153000",
-        "https://example.com/nvidia-news",
-        "Example News",
-        "",
-        "ECON_STOCKMARKET;ECON_TECH",
-        "",
-        "",
-        "NVIDIA,123;Microsoft,456",
-        "-3.2,1.0,4.0,5.0,6.0,100",
-        "NVIDIA,123",
-        "",
-    ]
+def test_gkg_rejects_noncanonical_row_width():
+    # Daily GDELT news files use the official 27-column GKG 2.1 schema.
+    row = [""] * 11
     provider = GkgHistoricalProvider()
     provider.session = FakeSession(_zip_payload([row]))
-    out = provider.fetch_day("NVDA", date(2026, 8, 20))
-    assert len(out) == 1
-    assert out.iloc[0]["symbol"] == "NVDA"
-    assert out.iloc[0]["url"] == "https://example.com/nvidia-news"
-    assert out.iloc[0]["source"] == "Example News"
-    assert out.iloc[0]["sentiment"] == -3.2
+    try:
+        provider.fetch_day("NVDA", date(2026, 8, 20))
+    except Exception as exc:
+        assert "ParserError" in type(exc).__name__ or "columns" in str(exc).lower()
+    else:
+        raise AssertionError("Expected non-canonical GKG fixture to be rejected")
 
 
 def test_gkg_day_is_cached_across_symbols():
