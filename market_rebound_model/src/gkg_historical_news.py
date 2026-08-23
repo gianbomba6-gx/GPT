@@ -1,9 +1,13 @@
 """Historical GDELT GKG news features.
 
-Supports legacy GKG 1.0 daily files (11 columns), compact 11-column
+Supports legacy GKG 1.0 daily files (11-column), compact 11-column
 fixtures, and GKG 2.x 27-column files. The provider caches each daily archive,
 retries transient HTTP failures, and uses vectorized organization matching so
 large historical GKG files do not require a full ``iterrows()`` scan.
+
+Historical GDELT archives can have occasional missing days. Those gaps are
+reported and skipped so one unavailable archive does not invalidate an entire
+year or the full backfill.
 """
 from __future__ import annotations
 
@@ -121,7 +125,12 @@ class GkgHistoricalProvider:
             "Accept": "application/zip, application/octet-stream;q=0.9, */*;q=0.8",
         })
         self._day_cache: dict[str, pd.DataFrame] = {}
+        self._missing_days: set[str] = set()
         self._last_request_at = 0.0
+
+    @property
+    def missing_days(self) -> list[str]:
+        return sorted(self._missing_days)
 
     def _request_archive(self, day_s: str) -> bytes:
         url = GKG_BASE.format(day=day_s)
@@ -219,7 +228,12 @@ class GkgHistoricalProvider:
         )
 
     def fetch_day_multi(self, symbols: list[str], day: date) -> pd.DataFrame:
-        """Read one GKG day once and match all requested symbols vectorially."""
+        """Read one GKG day once and match all requested symbols vectorially.
+
+        Missing historical GKG archives are treated as data gaps, not fatal
+        workflow errors. The missing date is recorded in ``missing_days`` and
+        an empty normalized frame is returned.
+        """
         normalized_symbols = [s.upper() for s in symbols]
         aliases = {}
         for symbol in normalized_symbols:
@@ -228,7 +242,14 @@ class GkgHistoricalProvider:
                 raise ValueError(f"No GKG organization mapping for {symbol}")
             aliases[symbol] = mapping
 
-        df = self._load_day(day)
+        day_s = day.strftime("%Y%m%d")
+        try:
+            df = self._load_day(day)
+        except FileNotFoundError:
+            self._missing_days.add(day_s)
+            print(f"GKG MISSING ARCHIVE {day_s}: skipped")
+            return pd.DataFrame(columns=NORMALIZED_COLUMNS)
+
         if df.empty:
             return pd.DataFrame(columns=NORMALIZED_COLUMNS)
 
