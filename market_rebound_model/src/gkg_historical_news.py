@@ -1,8 +1,7 @@
 """Historical GDELT GKG daily news features (2013-present).
 
-The public daily GKG archives have appeared with slightly different field
-layouts over time. We therefore parse rows semantically rather than requiring
-one fixed column count, while still extracting the fields needed by the model.
+The public daily GKG archives can contain layout variations, so rows are
+parsed semantically instead of requiring one fixed field count.
 """
 from __future__ import annotations
 
@@ -66,6 +65,8 @@ def _extract_row(fields: list[str], terms: tuple[str, ...]) -> dict | None:
 
     url_idx = next((i for i, v in enumerate(values) if _URL_RE.match(v)), None)
     source_idx = next((i for i, v in enumerate(values[:8]) if _DOMAIN_RE.match(v)), None)
+    if source_idx is None and url_idx is not None and url_idx > 0:
+        source_idx = url_idx - 1
 
     entity_candidates = [v for v in values if _matches(v, terms)]
     if not entity_candidates:
