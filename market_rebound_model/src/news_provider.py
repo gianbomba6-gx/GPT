@@ -25,6 +25,10 @@ class NewsProvider:
     def fetch(self, query: NewsQuery) -> pd.DataFrame:
         raise NotImplementedError
 
+def _utc(value: datetime) -> pd.Timestamp:
+    ts = pd.Timestamp(value)
+    return ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+
 def validate_articles(df: pd.DataFrame, query: NewsQuery) -> pd.DataFrame:
     missing = [c for c in NORMALIZED_COLUMNS if c not in df.columns]
     if missing:
@@ -33,8 +37,7 @@ def validate_articles(df: pd.DataFrame, query: NewsQuery) -> pd.DataFrame:
     out["published_at"] = pd.to_datetime(out["published_at"], utc=True, errors="coerce")
     out = out.dropna(subset=["published_at", "headline"]).copy()
     # Hard temporal fence: articles after the requested end are never accepted.
-    start = pd.Timestamp(query.start, tz="UTC")
-    end = pd.Timestamp(query.end, tz="UTC")
+    start, end = _utc(query.start), _utc(query.end)
     out = out[(out["published_at"] >= start) & (out["published_at"] <= end)]
     out["symbol"] = query.symbol.upper()
     return out[NORMALIZED_COLUMNS]
