@@ -16,20 +16,12 @@ def _zip_payload(rows):
 class FakeResponse:
     status_code = 200
     headers = {"content-type": "application/zip"}
-
-    def __init__(self, content):
-        self.content = content
-
-    def raise_for_status(self):
-        pass
+    def __init__(self, content): self.content = content
+    def raise_for_status(self): pass
 
 
 class FakeSession:
-    def __init__(self, content):
-        self.content = content
-        self.headers = {}
-        self.calls = 0
-
+    def __init__(self, content): self.content, self.calls = content, 0
     def get(self, *args, **kwargs):
         self.calls += 1
         return FakeResponse(self.content)
@@ -49,6 +41,22 @@ def _canonical_row(org):
     return row
 
 
+def _compact_row(org="NVIDIA"):
+    return [
+        "20260820153000",
+        "https://example.com/nvidia-news",
+        "example.com",
+        "",
+        "ECON_STOCKMARKET;ECON_TECH",
+        "",
+        "",
+        f"{org},123;Microsoft,456",
+        "-3.2,1.0,4.0,5.0,6.0,100",
+        f"{org},123",
+        "",
+    ]
+
+
 def test_gkg_filters_organization_and_parses_tone():
     provider = GkgHistoricalProvider()
     provider.session = FakeSession(_zip_payload([_canonical_row("NVIDIA"), _canonical_row("Microsoft")]))
@@ -61,16 +69,27 @@ def test_gkg_filters_organization_and_parses_tone():
     assert provider.session.calls == 1
 
 
-def test_gkg_rejects_noncanonical_row_width_with_clear_error():
-    row = [""] * 11
+def test_compact_gkg_layout_is_supported():
+    provider = GkgHistoricalProvider()
+    provider.session = FakeSession(_zip_payload([_compact_row()]))
+    out = provider.fetch_day("NVDA", date(2026, 8, 20))
+    assert len(out) == 1
+    assert out.iloc[0]["symbol"] == "NVDA"
+    assert out.iloc[0]["url"] == "https://example.com/nvidia-news"
+    assert out.iloc[0]["source"] == "example.com"
+    assert out.iloc[0]["sentiment"] == -3.2
+
+
+def test_gkg_rejects_unknown_row_width():
+    row = [""] * 12
     provider = GkgHistoricalProvider()
     provider.session = FakeSession(_zip_payload([row]))
     try:
         provider.fetch_day("NVDA", date(2026, 8, 20))
     except RuntimeError as exc:
-        assert "expected 27, found 11" in str(exc)
+        assert "expected 27 or 11" in str(exc)
     else:
-        raise AssertionError("Expected non-canonical GKG fixture to be rejected")
+        raise AssertionError("Expected unsupported GKG layout to be rejected")
 
 
 def test_gkg_day_is_cached_across_symbols():
