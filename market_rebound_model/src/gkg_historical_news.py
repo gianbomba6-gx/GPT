@@ -45,11 +45,12 @@ SYMBOL_ORGANIZATIONS = {
     "TSLA": ("tesla", "tesla motors", "tesla inc", "tesla, inc"),
 }
 GKG_BASE = "https://data.gdeltproject.org/gkg/{day}.gkg.csv.zip"
-_TONE_RE = re.compile(r"^-?\d+(?:\.\d+)?(?:,-?\d+(?:\.\d+)?){2,}")
 _URL_RE = re.compile(r"^https?://", re.I)
+
 
 def _norm(value: object) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
 
 def _tone(value: object) -> float | None:
     if pd.isna(value) or not str(value).strip():
@@ -59,6 +60,7 @@ def _tone(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
 
+
 def _parse_gkg_date(value: object) -> pd.Timestamp:
     text = str(value or "").strip()
     for fmt in ("%Y%m%d%H%M%S", "%Y%m%d"):
@@ -67,14 +69,17 @@ def _parse_gkg_date(value: object) -> pd.Timestamp:
             return parsed
     return pd.NaT
 
+
 def _org_names(value: object) -> list[str]:
     text = str(value or "")
     return [part.split(",", 1)[0].strip() for part in text.split(";") if part.split(",", 1)[0].strip()]
+
 
 def _matches_org_field(value: object, aliases: tuple[str, ...]) -> bool:
     names = _org_names(value)
     alias_norms = {_norm(a) for a in aliases if _norm(a)}
     return any(any(a == _norm(name) or a in _norm(name) for a in alias_norms) for name in names)
+
 
 def _matches_row(row: pd.Series, aliases: tuple[str, ...]) -> bool:
     return (
@@ -82,6 +87,7 @@ def _matches_row(row: pd.Series, aliases: tuple[str, ...]) -> bool:
         or _matches_org_field(row["Organizations"], aliases)
         or _matches_org_field(row["AllNames"], aliases)
     )
+
 
 def _row_to_article(row: pd.Series, aliases: tuple[str, ...], symbol: str) -> dict | None:
     if not _matches_row(row, aliases):
@@ -103,6 +109,7 @@ def _row_to_article(row: pd.Series, aliases: tuple[str, ...], symbol: str) -> di
         "relevance": 1.0,
         "novelty": pd.NA,
     }
+
 
 class GkgHistoricalProvider:
     def __init__(self, timeout: int = 90):
@@ -132,40 +139,73 @@ class GkgHistoricalProvider:
                 width = len(first_fields)
                 fh.seek(0)
                 if width == len(GKG_COLUMNS):
-                    raw = pd.read_csv(fh, sep="\t", header=None, names=GKG_COLUMNS, usecols=[1, 3, 4, 8, 13, 14, 15, 23], dtype=str, keep_default_na=False, na_filter=False)
+                    raw = pd.read_csv(
+                        fh, sep="\t", header=None, names=GKG_COLUMNS,
+                        usecols=[1, 3, 4, 8, 13, 14, 15, 23], dtype=str,
+                        keep_default_na=False, na_filter=False,
+                    )
                     df = raw
                 elif width == len(GKG1_COLUMNS) and len(first_fields) > 1 and _URL_RE.match(first_fields[1].strip()):
-                    raw = pd.read_csv(fh, sep="\t", header=None, names=COMPACT_COLUMNS, dtype=str, keep_default_na=False, na_filter=False)
-                    df = raw.assign(Organizations="")[["DATE", "SourceCommonName", "DocumentIdentifier", "V2Themes", "Organizations", "V2Organizations", "V2Tone", "AllNames"]]
+                    raw = pd.read_csv(
+                        fh, sep="\t", header=None, names=COMPACT_COLUMNS,
+                        dtype=str, keep_default_na=False, na_filter=False,
+                    )
+                    df = raw.assign(Organizations="")[[
+                        "DATE", "SourceCommonName", "DocumentIdentifier", "V2Themes",
+                        "Organizations", "V2Organizations", "V2Tone", "AllNames",
+                    ]]
                 elif width == len(GKG1_COLUMNS):
-                    raw = pd.read_csv(fh, sep="\t", header=None, names=GKG1_COLUMNS, dtype=str, keep_default_na=False, na_filter=False)
+                    raw = pd.read_csv(
+                        fh, sep="\t", header=None, names=GKG1_COLUMNS,
+                        dtype=str, keep_default_na=False, na_filter=False,
+                    )
                     df = pd.DataFrame({
-                        "DATE": raw["DATE"], "SourceCommonName": raw["SOURCES"], "DocumentIdentifier": raw["SOURCEURLS"],
-                        "V2Themes": raw["THEMES"], "Organizations": raw["ORGANIZATIONS"], "V2Organizations": "",
-                        "V2Tone": raw["TONE"], "AllNames": "",
+                        "DATE": raw["DATE"],
+                        "SourceCommonName": raw["SOURCES"],
+                        "DocumentIdentifier": raw["SOURCEURLS"],
+                        "V2Themes": raw["THEMES"],
+                        "Organizations": raw["ORGANIZATIONS"],
+                        "V2Organizations": "",
+                        "V2Tone": raw["TONE"],
+                        "AllNames": "",
                     })
                 else:
-                    raise RuntimeError(f"Unsupported GDELT GKG row width for {day_s}: found {width}; expected {len(GKG_COLUMNS)} or {len(GKG1_COLUMNS)}")
+                    raise RuntimeError(
+                        f"Unsupported GDELT GKG row width for {day_s}: "
+                        f"found {width}; expected {len(GKG_COLUMNS)} or {len(GKG1_COLUMNS)}"
+                    )
         if df.empty:
             raise RuntimeError(f"Empty GKG data file for {day_s}")
         self._day_cache[day_s] = df
         return df
 
-    def fetch_day(self, symbol: str, day: date) -> pd.DataFrame:
-        symbol = symbol.upper()
-        aliases = SYMBOL_ORGANIZATIONS.get(symbol)
-        if not aliases:
-            raise ValueError(f"No GKG organization mapping for {symbol}")
+    def fetch_day_multi(self, symbols: list[str], day: date) -> pd.DataFrame:
+        """Read one GKG day once and match all requested symbols in one pass."""
+        normalized_symbols = [s.upper() for s in symbols]
+        aliases = {}
+        for symbol in normalized_symbols:
+            mapping = SYMBOL_ORGANIZATIONS.get(symbol)
+            if not mapping:
+                raise ValueError(f"No GKG organization mapping for {symbol}")
+            aliases[symbol] = mapping
+
         df = self._load_day(day)
         rows = []
         for _, row in df.iterrows():
-            item = _row_to_article(row, aliases, symbol)
-            if item is not None:
-                rows.append(item)
+            for symbol, symbol_aliases in aliases.items():
+                item = _row_to_article(row, symbol_aliases, symbol)
+                if item is not None:
+                    rows.append(item)
         if not rows:
             return pd.DataFrame(columns=NORMALIZED_COLUMNS)
-        out = pd.DataFrame(rows)
-        return out[NORMALIZED_COLUMNS].drop_duplicates(subset=["published_at", "url", "symbol"]).reset_index(drop=True)
+        return (
+            pd.DataFrame(rows)[NORMALIZED_COLUMNS]
+            .drop_duplicates(subset=["published_at", "url", "symbol"])
+            .reset_index(drop=True)
+        )
+
+    def fetch_day(self, symbol: str, day: date) -> pd.DataFrame:
+        return self.fetch_day_multi([symbol], day)
 
     def fetch(self, symbol: str, start: date, end: date) -> pd.DataFrame:
         if end < start:
