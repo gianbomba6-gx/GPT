@@ -1,0 +1,42 @@
+name: GDELT GKG historical smoke test
+
+on:
+  push:
+    paths:
+      - 'market_rebound_model/src/gkg_historical_news.py'
+      - 'market_rebound_model/tests/test_gkg_historical_news.py'
+      - 'market_rebound_model/requirements.txt'
+      - '.github/workflows/gkg-historical-smoke-test.yml'
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Deterministic GKG tests
+        run: python -m pytest -q tests/test_gkg_historical_news.py
+      - name: Live historical GKG smoke test
+        run: |
+          python - <<'PY'
+          from datetime import date
+          from src.gkg_historical_news import GkgHistoricalProvider
+
+          provider = GkgHistoricalProvider(timeout=90)
+          total = 0
+          for symbol in ["STLAM.MI", "SPCX", "NVDA", "TSLA"]:
+              df = provider.fetch_day(symbol, date(2026, 8, 20))
+              print(f"GKG SMOKE {symbol}: {len(df)} articles")
+              total += len(df)
+
+          if total <= 0:
+              raise SystemExit("GKG historical smoke test returned zero articles")
+          print(f"GKG HISTORICAL SMOKE PASS: total={total}")
+          PY
