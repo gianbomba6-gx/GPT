@@ -41,19 +41,19 @@ def _canonical_row(org):
     return row
 
 
-def _compact_row(org="NVIDIA"):
+def _gkg1_row(org="NVIDIA"):
     return [
         "20260820153000",
-        "https://example.com/nvidia-news",
-        "example.com",
+        "3",
         "",
         "ECON_STOCKMARKET;ECON_TECH",
         "",
         "",
-        f"{org},123;Microsoft,456",
-        "-3.2,1.0,4.0,5.0,6.0,100",
-        f"{org},123",
+        f"{org};Microsoft",
+        "-3.2,1.0,4.0,5.0,6.0",
         "",
+        "example.com",
+        "https://example.com/nvidia-news",
     ]
 
 
@@ -69,9 +69,9 @@ def test_gkg_filters_organization_and_parses_tone():
     assert provider.session.calls == 1
 
 
-def test_compact_gkg_layout_is_supported():
+def test_gkg1_layout_is_supported():
     provider = GkgHistoricalProvider()
-    provider.session = FakeSession(_zip_payload([_compact_row()]))
+    provider.session = FakeSession(_zip_payload([_gkg1_row()]))
     out = provider.fetch_day("NVDA", date(2026, 8, 20))
     assert len(out) == 1
     assert out.iloc[0]["symbol"] == "NVDA"
@@ -87,7 +87,8 @@ def test_gkg_rejects_unknown_row_width():
     try:
         provider.fetch_day("NVDA", date(2026, 8, 20))
     except RuntimeError as exc:
-        assert "expected 27 or 11" in str(exc)
+        message = str(exc)
+        assert "expected 27" in message and "11" in message
     else:
         raise AssertionError("Expected unsupported GKG layout to be rejected")
 
