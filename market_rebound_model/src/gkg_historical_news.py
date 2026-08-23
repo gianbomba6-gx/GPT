@@ -10,7 +10,6 @@ import zipfile
 import pandas as pd
 import requests
 
-# Public compatibility schema for canonical GKG 2.1 fixtures/tools.
 GKG_COLUMNS = [
     "GKGRECORDID", "DATE", "SourceCollectionIdentifier", "SourceCommonName",
     "DocumentIdentifier", "Counts", "V2Counts", "Themes", "V2Themes",
@@ -20,7 +19,6 @@ GKG_COLUMNS = [
     "AllNames", "Amounts", "TranslationInfo", "Extras",
 ]
 
-# Compact GKG layout encountered in some public extracts.
 COMPACT_COLUMNS = [
     "DATE", "DocumentIdentifier", "SourceCommonName", "V2Counts", "V2Themes",
     "V2Locations", "V2Persons", "V2Organizations", "V2Tone", "AllNames", "Extras",
@@ -32,18 +30,25 @@ NORMALIZED_COLUMNS = [
 ]
 
 SYMBOL_ORGANIZATIONS = {
-    "STLAM.MI": ("stellantis", "stellantis nv", "stellantis n.v.", "stla", "fiat chrysler", "fiat chrysler automobiles"),
-    "SPCX": ("spacex", "space exploration technologies", "space exploration technologies corp"),
-    "NVDA": ("nvidia", "nvidia corporation", "nvidia corp", "nvda"),
-    "TSLA": ("tesla", "tesla motors", "tesla inc", "tesla, inc", "tsla"),
+    "STLAM.MI": (
+        "stellantis", "stellantis nv", "stellantis n.v.", "stla",
+        "fiat chrysler", "fiat chrysler automobiles",
+    ),
+    "SPCX": (
+        "spacex", "space exploration technologies",
+        "space exploration technologies corp",
+    ),
+    "NVDA": (
+        "nvidia", "nvidia corporation", "nvidia corp", "nvda",
+    ),
+    "TSLA": (
+        "tesla", "tesla motors", "tesla inc", "tesla, inc", "tsla",
+    ),
 }
 
 GKG_BASE = "https://data.gdeltproject.org/gkg/{day}.gkg.csv.zip"
 _TIMESTAMP_RE = re.compile(r"^\d{14}$")
-_RECORD_RE = re.compile(r"^\d{14}-(?:T?\d+)$")
 _TONE_RE = re.compile(r"^-?\d+(?:\.\d+)?(?:,-?\d+(?:\.\d+)?){2,}")
-_URL_RE = re.compile(r"^https?://", re.I)
-_DOMAIN_RE = re.compile(r"^[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?::\d+)?$")
 
 
 def _tone(value: object) -> float | None:
@@ -55,31 +60,32 @@ def _tone(value: object) -> float | None:
         return None
 
 
+def _compact_alnum(text: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(text or "").lower())
+
+
 def _matches(text: object, terms: tuple[str, ...]) -> bool:
-    if not isinstance(text, str) or not text:
+    """Match issuer names robustly across punctuation, suffixes and spacing."""
+    normalized = _compact_alnum(text)
+    if not normalized:
         return False
-    haystack = re.sub(r"\s+", " ", text.lower())
-    return any(
-        re.search(r"(?<![a-z0-9])" + re.escape(term.lower()) + r"(?![a-z0-9])", haystack)
-        for term in terms
-    )
+    return any(_compact_alnum(term) and _compact_alnum(term) in normalized for term in terms)
 
 
 def _canonical_from_fields(fields: list[str]) -> dict[str, str] | None:
     if len(fields) < 20:
         return None
-    # Canonical GKG 2.1: fixed field positions documented by GDELT.
     return {
         "record_id": fields[0],
         "date": fields[1],
         "source": fields[3],
         "url": fields[4],
         "themes": fields[8],
-        "persons": fields[12],
         "organizations": fields[13],
         "v2organizations": fields[14],
         "tone": fields[15],
-        "all_names": fields[23],
+        "all_names": fields[23] if len(fields) > 23 else "",
+        "all_fields": "\t".join(fields),
     }
 
 
@@ -93,36 +99,38 @@ def _compact_from_fields(fields: list[str]) -> dict[str, str] | None:
         "source": row["SourceCommonName"],
         "url": row["DocumentIdentifier"],
         "themes": row["V2Themes"],
-        "persons": row["V2Persons"],
         "organizations": row["V2Organizations"],
         "v2organizations": row["V2Organizations"],
         "tone": row["V2Tone"],
         "all_names": row["AllNames"],
+        "all_fields": "\t".join(fields),
     }
 
 
 def _extract_row(fields: list[str], terms: tuple[str, ...]) -> dict | None:
     values = [str(x or "").strip() for x in fields]
     row = _canonical_from_fields(values) if len(values) >= 20 else _compact_from_fields(values)
-    if row is None:
-        return None
-    if not _TIMESTAMP_RE.match(row["date"]):
+    if row is None or not _TIMESTAMP_RE.match(row["date"]):
         return None
 
-    search_values = [
-        row["organizations"], row["v2organizations"], row["all_names"],
-        row["themes"], row["source"], row["url"], row["persons"],
-    ]
-    if not any(_matches(value, terms) for value in search_values):
+    # Primary match: the GDELT organization fields. Fallback: scan the
+    # complete record because some current public extracts have layout
+    # differences or sparsely populated organization fields.
+    primary_values = [row["organizations"], row["v2organizations"], row["all_names"]]
+    matched = any(_matches(value, terms) for value in primary_values)
+    if not matched:
+        matched = _matches(row["all_fields"], terms)
+    if not matched:
         return None
 
-    summary = row["themes"] or ""
     return {
-        "published_at": pd.to_datetime(row["date"], format="%Y%m%d%H%M%S", utc=True, errors="coerce"),
+        "published_at": pd.to_datetime(
+            row["date"], format="%Y%m%d%H%M%S", utc=True, errors="coerce"
+        ),
         "headline": "",
         "source": row["source"],
         "url": row["url"],
-        "summary": summary,
+        "summary": row["themes"] or "",
         "sentiment": _tone(row["tone"]),
         "_record_id": row["record_id"],
     }
@@ -160,8 +168,7 @@ class GkgHistoricalProvider:
             raise RuntimeError(f"Empty GKG data file for {day_s}")
         widths = pd.Series([len(r) for r in rows[:2000]]).value_counts().to_dict()
         supported = {11, 27}
-        observed = set(widths)
-        if not observed.intersection(supported):
+        if not set(widths).intersection(supported):
             raise RuntimeError(f"Unsupported GDELT GKG row widths for {day_s}: {widths}")
         self._day_cache[day_s] = rows
         return rows
