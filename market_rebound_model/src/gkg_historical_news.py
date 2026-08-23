@@ -1,8 +1,4 @@
-"""Historical GDELT GKG daily news features (2013-present).
-
-The public daily GKG archives can contain layout variations, so rows are
-parsed semantically instead of requiring one fixed field count.
-"""
+"""Historical GDELT GKG daily news features (2013-present)."""
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -14,8 +10,7 @@ import zipfile
 import pandas as pd
 import requests
 
-# Public compatibility schema for canonical GKG 2.1 fixtures/tools. The
-# production parser below does not require a fixed row width.
+# Public compatibility schema for canonical GKG 2.1 fixtures/tools.
 GKG_COLUMNS = [
     "GKGRECORDID", "DATE", "SourceCollectionIdentifier", "SourceCommonName",
     "DocumentIdentifier", "Counts", "V2Counts", "Themes", "V2Themes",
@@ -25,16 +20,22 @@ GKG_COLUMNS = [
     "AllNames", "Amounts", "TranslationInfo", "Extras",
 ]
 
+# Compact GKG layout encountered in some public extracts.
+COMPACT_COLUMNS = [
+    "DATE", "DocumentIdentifier", "SourceCommonName", "V2Counts", "V2Themes",
+    "V2Locations", "V2Persons", "V2Organizations", "V2Tone", "AllNames", "Extras",
+]
+
 NORMALIZED_COLUMNS = [
     "published_at", "symbol", "headline", "source", "url", "summary",
     "category", "sentiment", "intensity", "relevance", "novelty",
 ]
 
 SYMBOL_ORGANIZATIONS = {
-    "STLAM.MI": ("stellantis", "stla", "fiat chrysler", "fiat chrysler automobiles"),
-    "SPCX": ("spacex", "space exploration technologies"),
-    "NVDA": ("nvidia", "nvda"),
-    "TSLA": ("tesla", "tesla motors", "tesla inc"),
+    "STLAM.MI": ("stellantis", "stellantis nv", "stellantis n.v.", "stla", "fiat chrysler", "fiat chrysler automobiles"),
+    "SPCX": ("spacex", "space exploration technologies", "space exploration technologies corp"),
+    "NVDA": ("nvidia", "nvidia corporation", "nvidia corp", "nvda"),
+    "TSLA": ("tesla", "tesla motors", "tesla inc", "tesla, inc", "tsla"),
 }
 
 GKG_BASE = "https://data.gdeltproject.org/gkg/{day}.gkg.csv.zip"
@@ -57,49 +58,73 @@ def _tone(value: object) -> float | None:
 def _matches(text: object, terms: tuple[str, ...]) -> bool:
     if not isinstance(text, str) or not text:
         return False
-    haystack = text.lower()
+    haystack = re.sub(r"\s+", " ", text.lower())
     return any(
-        re.search(r"(?<![a-z0-9])" + re.escape(term) + r"(?![a-z0-9])", haystack)
+        re.search(r"(?<![a-z0-9])" + re.escape(term.lower()) + r"(?![a-z0-9])", haystack)
         for term in terms
     )
 
 
-def _extract_row(fields: list[str], terms: tuple[str, ...]) -> dict | None:
-    if len(fields) < 4:
+def _canonical_from_fields(fields: list[str]) -> dict[str, str] | None:
+    if len(fields) < 20:
         return None
-    values = [str(x or "").strip() for x in fields]
-
-    record_idx = next((i for i, v in enumerate(values[:4]) if _RECORD_RE.match(v)), None)
-    date_idx = next((i for i, v in enumerate(values[:6]) if _TIMESTAMP_RE.match(v)), None)
-    if date_idx is None:
-        return None
-
-    url_idx = next((i for i, v in enumerate(values) if _URL_RE.match(v)), None)
-    source_idx = next((i for i, v in enumerate(values[:8]) if _DOMAIN_RE.match(v)), None)
-    if source_idx is None and url_idx is not None and url_idx > 0:
-        source_idx = url_idx - 1
-
-    entity_candidates = [v for v in values if _matches(v, terms)]
-    if not entity_candidates:
-        return None
-    org_value = max(entity_candidates, key=lambda v: (v.count(";"), v.count(","), len(v)))
-
-    tone_value = next((v for v in values if _TONE_RE.match(v)), "")
-    themes_candidates = [
-        v for v in values
-        if ";" in v and any(token in v.upper() for token in ("ECON_", "TAX_", "CRISISLEX", "WB_"))
-    ]
-    summary = max(themes_candidates, key=len) if themes_candidates else ""
-
+    # Canonical GKG 2.1: fixed field positions documented by GDELT.
     return {
-        "published_at": pd.to_datetime(values[date_idx], format="%Y%m%d%H%M%S", utc=True, errors="coerce"),
+        "record_id": fields[0],
+        "date": fields[1],
+        "source": fields[3],
+        "url": fields[4],
+        "themes": fields[8],
+        "persons": fields[12],
+        "organizations": fields[13],
+        "v2organizations": fields[14],
+        "tone": fields[15],
+        "all_names": fields[23],
+    }
+
+
+def _compact_from_fields(fields: list[str]) -> dict[str, str] | None:
+    if len(fields) != len(COMPACT_COLUMNS):
+        return None
+    row = dict(zip(COMPACT_COLUMNS, fields))
+    return {
+        "record_id": "",
+        "date": row["DATE"],
+        "source": row["SourceCommonName"],
+        "url": row["DocumentIdentifier"],
+        "themes": row["V2Themes"],
+        "persons": row["V2Persons"],
+        "organizations": row["V2Organizations"],
+        "v2organizations": row["V2Organizations"],
+        "tone": row["V2Tone"],
+        "all_names": row["AllNames"],
+    }
+
+
+def _extract_row(fields: list[str], terms: tuple[str, ...]) -> dict | None:
+    values = [str(x or "").strip() for x in fields]
+    row = _canonical_from_fields(values) if len(values) >= 20 else _compact_from_fields(values)
+    if row is None:
+        return None
+    if not _TIMESTAMP_RE.match(row["date"]):
+        return None
+
+    search_values = [
+        row["organizations"], row["v2organizations"], row["all_names"],
+        row["themes"], row["source"], row["url"], row["persons"],
+    ]
+    if not any(_matches(value, terms) for value in search_values):
+        return None
+
+    summary = row["themes"] or ""
+    return {
+        "published_at": pd.to_datetime(row["date"], format="%Y%m%d%H%M%S", utc=True, errors="coerce"),
         "headline": "",
-        "source": values[source_idx] if source_idx is not None else "",
-        "url": values[url_idx] if url_idx is not None else "",
+        "source": row["source"],
+        "url": row["url"],
         "summary": summary,
-        "sentiment": _tone(tone_value),
-        "_record_id": values[record_idx] if record_idx is not None else "",
-        "_org_value": org_value,
+        "sentiment": _tone(row["tone"]),
+        "_record_id": row["record_id"],
     }
 
 
@@ -127,18 +152,17 @@ class GkgHistoricalProvider:
                 raise RuntimeError(f"Empty GKG archive for {day_s}")
             with zf.open(members[0]) as fh:
                 rows = [
-                    row
-                    for row in csv.reader(
-                        (line.decode("utf-8", "replace") for line in fh),
-                        delimiter="\t",
+                    row for row in csv.reader(
+                        (line.decode("utf-8", "replace") for line in fh), delimiter="\t"
                     )
                 ]
         if not rows:
             raise RuntimeError(f"Empty GKG data file for {day_s}")
         widths = pd.Series([len(r) for r in rows[:2000]]).value_counts().to_dict()
-        dominant = max(widths, key=widths.get)
-        if dominant < 4:
-            raise RuntimeError(f"GDELT GKG archive {day_s} has invalid row width distribution: {widths}")
+        supported = {11, 27}
+        observed = set(widths)
+        if not observed.intersection(supported):
+            raise RuntimeError(f"Unsupported GDELT GKG row widths for {day_s}: {widths}")
         self._day_cache[day_s] = rows
         return rows
 
