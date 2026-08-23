@@ -1,8 +1,9 @@
-"""Candidate-day GDELT GKG backfill for causal rebound-news research.
+"""Candidate-day GDELT GKG backfill for causal rebound research.
 
 Downloads GKG only for days where a tracked stock falls at least the configured
-threshold. News published after the local close is retained and assigned to the
-next available market session instead of being discarded.
+threshold. The model decision is made after that day's close, so every article
+published on the same calendar day—including post-close articles—is available
+for the next-session prediction and remains aligned to the candidate day.
 """
 from __future__ import annotations
 
@@ -91,12 +92,9 @@ def aggregate_daily(raw: pd.DataFrame) -> pd.DataFrame:
     x["candidate_day"] = pd.to_datetime(x["candidate_day"], errors="coerce").dt.normalize()
     x = x.dropna(subset=["published_at", "candidate_day", "symbol"]).copy()
 
-    def assign_date(row: pd.Series) -> pd.Timestamp:
-        day = row["candidate_day"].date()
-        cutoff = close_utc(day, row["symbol"])
-        return row["candidate_day"] if row["published_at"] <= cutoff else row["candidate_day"] + pd.Timedelta(days=1)
-
-    x["Date"] = x.apply(assign_date, axis=1)
+    # The prediction is made after the candidate day's close. All articles from
+    # that same calendar day are therefore valid information for the next session.
+    x["Date"] = x["candidate_day"]
     daily = (x.groupby(["Date", "symbol"], as_index=False)
         .agg(news_sentiment=("sentiment", "mean"),
              news_intensity=("intensity", "mean"),
@@ -130,9 +128,8 @@ def run(symbols: list[str], start: str, end: str, threshold: float, out_raw: str
                 df["candidate_day"] = day.isoformat()
                 raw_chunks.append(df)
                 cutoff = close_utc(day, symbol)
-                total = len(df)
                 post_close = int((pd.to_datetime(df["published_at"], utc=True, errors="coerce") > cutoff).sum())
-                print(f"NEWS {symbol} {day}: {total} articles; post-close={post_close}")
+                print(f"NEWS {symbol} {day}: {len(df)} articles; post-close={post_close}")
             else:
                 print(f"NEWS {symbol} {day}: 0 articles")
 
