@@ -3,9 +3,7 @@ from __future__ import annotations
 import pandas as pd
 from news_event_classifier import add_event_features
 
-# UTC close times for the exchanges used by the current universe in summer.
-# The live system will later derive these from exchange calendars/time zones.
-CLOSE_UTC_HOUR = {"STLAM.MI": 15.5, "STLA": 15.5, "SPCX": 20.0, "NVDA": 20.0, "TSLA": 20.0}
+CLOSE_UTC_MINUTE = {"STLAM.MI": 15 * 60 + 30, "STLA": 15 * 60 + 30, "SPCX": 20 * 60, "NVDA": 20 * 60, "TSLA": 20 * 60}
 
 
 def build_news_features(raw: pd.DataFrame) -> pd.DataFrame:
@@ -16,12 +14,9 @@ def build_news_features(raw: pd.DataFrame) -> pd.DataFrame:
     x = x.loc[ts.notna()].copy()
     x["_ts"] = ts.loc[x.index]
     x["_date"] = x["_ts"].dt.normalize()
-    hours = x["symbol"].map(CLOSE_UTC_HOUR).fillna(20.0)
-    minutes_from_midnight = x["_ts"].dt.hour * 60 + x["_ts"].dt.minute + x["_ts"].dt.second / 60
-    cutoff = hours * 60
-    # A signal made after the close cannot use an article published later that day.
-    # Such an article becomes available for the following market session.
-    x["available_date"] = x["_date"] + pd.to_timedelta((minutes_from_midnight > cutoff).astype(int), unit="D")
+    cutoff = x["symbol"].map(CLOSE_UTC_MINUTE).fillna(20 * 60)
+    minute = x["_ts"].dt.hour * 60 + x["_ts"].dt.minute + x["_ts"].dt.second / 60
+    x["available_date"] = x["_date"] + pd.to_timedelta((minute > cutoff).astype(int), unit="D")
     return (x.groupby(["available_date", "symbol"], as_index=False)
         .agg(news_count=("headline", "size"),
              negative_news_share=("is_negative_event", "mean"),
@@ -32,26 +27,40 @@ def build_news_features(raw: pd.DataFrame) -> pd.DataFrame:
 
 
 def merge_with_market(market: pd.DataFrame, news_daily: pd.DataFrame) -> pd.DataFrame:
-    """Attach each news bucket to the first market session on/after availability."""
+    """Map each news bucket to the first available market session, then exact-merge.
+
+    Unlike a backward asof merge, this never carries old news forward into a later
+    session with no new articles.
+    """
     m = market.copy()
-    m["Date"] = pd.to_datetime(m["Date"], utc=True, errors="coerce").dt.normalize().dt.tz_localize(None)
+    m["Date"] = pd.to_datetime(m["Date"], errors="coerce", utc=True).dt.normalize().dt.tz_localize(None)
     n = news_daily.copy()
-    n["available_date"] = pd.to_datetime(n["available_date"], utc=True, errors="coerce").dt.normalize().dt.tz_localize(None)
+    n["available_date"] = pd.to_datetime(n["available_date"], errors="coerce", utc=True).dt.normalize().dt.tz_localize(None)
     n = n.dropna(subset=["available_date", "symbol"])
-    parts = []
-    for symbol, ms in m.groupby("symbol", sort=False):
-        ns = n[n["symbol"] == symbol].sort_values("available_date")
-        ms = ms.sort_values("Date").copy()
-        if ns.empty:
-            parts.append(ms)
+    mapped = []
+    for symbol, ns in n.groupby("symbol", sort=False):
+        ms = m[m["symbol"] == symbol][["Date"]].drop_duplicates().sort_values("Date")
+        if ms.empty:
             continue
-        merged = pd.merge_asof(ms, ns, left_on="Date", right_on="available_date", direction="backward")
-        parts.append(merged)
-    out = pd.concat(parts, ignore_index=True) if parts else m
+        z = pd.merge_asof(ns.sort_values("available_date"), ms,
+                          left_on="available_date", right_on="Date", direction="forward")
+        mapped.append(z.dropna(subset=["Date"]))
+    if mapped:
+        n = pd.concat(mapped, ignore_index=True)
+        n = (n.groupby(["Date", "symbol"], as_index=False)
+             .agg(news_count=("news_count", "sum"),
+                  negative_news_share=("negative_news_share", "mean"),
+                  material_event_share=("material_event_share", "mean"),
+                  event_polarity=("event_polarity", "mean"),
+                  event_intensity=("event_intensity", "mean"),
+                  unique_event_types=("unique_event_types", "max")))
+        out = m.merge(n, on=["Date", "symbol"], how="left")
+    else:
+        out = m.copy()
     for c in ["news_count", "negative_news_share", "material_event_share", "event_polarity", "event_intensity", "unique_event_types"]:
         if c not in out:
             out[c] = 0.0
-    return out.drop(columns=["available_date", "symbol_y"], errors="ignore").rename(columns={"symbol_x": "symbol"}).fillna({
+    return out.fillna({
         "news_count": 0,
         "negative_news_share": 0,
         "material_event_share": 0,
