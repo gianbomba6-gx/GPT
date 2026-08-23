@@ -33,10 +33,41 @@ jobs:
       - name: Run historical news backfill
         env:
           ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
         run: |
-          python src/news_backfill_runner.py \
-            --start-date "${{ inputs.start_date }}" \
-            --end-date "${{ inputs.end_date }}"
+          args=(--start "$START_DATE")
+          if [ -n "$END_DATE" ]; then
+            args+=(--end "$END_DATE")
+          fi
+          python src/news_backfill_runner.py "${args[@]}"
+
+      - name: Build daily news features
+        run: python src/news_backfill.py results/news_raw.csv --out results/news_daily.csv
+
+      - name: Validate generated datasets
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          from pathlib import Path
+          raw = Path('results/news_raw.csv')
+          daily = Path('results/news_daily.csv')
+          if not raw.exists() or not daily.exists():
+              raise SystemExit('Expected news output files were not created')
+          r = pd.read_csv(raw)
+          d = pd.read_csv(daily)
+          required_raw = {'published_at','symbol','headline','sentiment','relevance'}
+          required_daily = {'Date','symbol','news_sentiment','news_intensity','news_relevance','news_count'}
+          if not required_raw.issubset(r.columns):
+              raise SystemExit(f'Missing raw columns: {required_raw - set(r.columns)}')
+          if not required_daily.issubset(d.columns):
+              raise SystemExit(f'Missing daily columns: {required_daily - set(d.columns)}')
+          if len(r) == 0:
+              raise SystemExit('Raw news dataset is empty')
+          print(f'VALIDATION raw={len(r)} daily={len(d)}')
+          print('RAW_BY_SYMBOL')
+          print(r.groupby('symbol').size().to_string())
+          PY
 
       - name: Upload raw and daily news datasets
         uses: actions/upload-artifact@v4
@@ -45,4 +76,4 @@ jobs:
           path: |
             market_rebound_model/results/news_raw.csv
             market_rebound_model/results/news_daily.csv
-          if-no-files-found: warn
+          if-no-files-found: error
