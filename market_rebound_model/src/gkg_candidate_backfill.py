@@ -45,7 +45,10 @@ def fetch_prices(symbol: str, start: str, end: str) -> pd.DataFrame:
         progress=False,
     )
     if raw.empty:
-        raise RuntimeError(f"No Yahoo data for {symbol}")
+        # A tracked symbol may legitimately have no history in an earlier year
+        # (SPCX is only present from 2026). Return an empty frame so the caller
+        # can skip that symbol for this year instead of failing the whole job.
+        return pd.DataFrame(columns=["Date", "ret"])
     if isinstance(raw.columns, pd.MultiIndex):
         raw.columns = raw.columns.get_level_values(0)
     raw = raw.rename(columns={"Close": "Ultimo"})
@@ -58,6 +61,10 @@ def candidate_dates(symbols: list[str], start: str, end: str, threshold: float) 
     out: dict[str, list[date]] = {}
     for symbol in symbols:
         d = fetch_prices(symbol, start, end)
+        if d.empty:
+            print(f"NO PRICE HISTORY {symbol}: {start}..{end}; skipping")
+            out[symbol] = []
+            continue
         out[symbol] = [x.Date.date() for _, x in d.iterrows() if float(x.ret) <= threshold]
     return out
 
