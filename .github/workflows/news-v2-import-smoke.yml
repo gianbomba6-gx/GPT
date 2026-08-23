@@ -1,0 +1,26 @@
+name: News V2 import smoke
+
+on:
+  push:
+    paths:
+      - 'market_rebound_model/rebound_model.py'
+      - 'market_rebound_model/live_alert.py'
+      - 'market_rebound_model/src/news_v2_backtest.py'
+      - 'market_rebound_model/tests/test_news_v2_integration.py'
+      - '.github/workflows/news-v2-import-smoke.yml'
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Import and integration tests
+        run: python -m pytest -q tests/test_gdelt_news.py tests/test_gkg_historical_news.py tests/test_news_event_classifier.py tests/test_news_v2_integration.py
