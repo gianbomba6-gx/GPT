@@ -14,7 +14,7 @@ def test_market_close_is_timezone_aware():
     assert us.hour == 20
 
 
-def test_filter_at_close_excludes_post_close_news():
+def test_filter_at_close_excludes_post_close_news_for_diagnostics():
     df = pd.DataFrame([
         {"published_at": "2026-08-19T19:00:00Z", "symbol": "NVDA"},
         {"published_at": "2026-08-19T20:30:00Z", "symbol": "NVDA"},
@@ -37,6 +37,19 @@ def test_aggregate_daily_uses_candidate_day_and_event_features():
     assert out.iloc[0]["news_count"] == 1
     assert out.iloc[0]["negative_news_share"] == 1
     assert out.iloc[0]["news_available"] == 1
+
+
+def test_post_close_news_is_assigned_to_next_session_date():
+    raw = pd.DataFrame([
+        {
+            "published_at": "2026-08-19T21:00:00Z", "candidate_day": "2026-08-19",
+            "symbol": "NVDA", "headline": "", "summary": "after close guidance cut",
+            "sentiment": -4.0, "intensity": 4.0, "relevance": 1.0, "novelty": 0.0,
+        }
+    ])
+    out = aggregate_daily(raw)
+    assert out.iloc[0]["Date"] == pd.Timestamp("2026-08-20")
+    assert out.iloc[0]["news_count"] == 1
 
 
 def test_merge_news_fills_missing_days_without_lookahead():
