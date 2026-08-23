@@ -1,5 +1,6 @@
 {
   "primary": "finnhub",
+  "historical": "gdelt",
   "fallback": "alphavantage",
   "finnhub": {
     "symbols": {
@@ -10,6 +11,12 @@
     },
     "historical_limit": "provider_documented_one_year"
   },
+  "gdelt": {
+    "enabled_for_historical": true,
+    "article_list_cap": 250,
+    "requires_recursive_window_splitting": true,
+    "search_terms_are_configured_per_symbol": true
+  },
   "alphavantage": {
     "enabled_for_fallback": true,
     "max_requests_per_run": 20
@@ -17,6 +24,7 @@
   "policy": {
     "never_claim_complete_history_when_provider_window_is_limited": true,
     "fail_fast_on_missing_credentials": true,
-    "preserve_provider_name": true
+    "preserve_provider_name": true,
+    "never_use_post_cutoff_news_in_backtests": true
   }
 }
