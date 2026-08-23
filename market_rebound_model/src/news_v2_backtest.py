@@ -1,4 +1,10 @@
-"""Walk-forward comparison of V1 vs V2 with causal news features."""
+"""Walk-forward comparison of V1 vs V2 with causal news features.
+
+The news dataset is intentionally backfilled only for candidate (down) days.
+Therefore the walk-forward model must also train/evaluate only on those same
+candidate days; otherwise the ``news_available`` flag would encode the target
+selection rule and create a severe look-ahead/selection bias.
+"""
 from __future__ import annotations
 
 import argparse
@@ -15,6 +21,7 @@ from live_alert import add_market_regime, REGIME_FEATURES
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = json.loads((ROOT / "config" / "tickers.json").read_text())
 TARGET = "target_3"
+SIGNAL_RETURN = -0.02
 NEWS_FEATURES = [
     "news_sentiment", "news_intensity", "news_relevance", "news_novelty",
     "news_count", "negative_news_share", "material_event_share",
@@ -75,29 +82,33 @@ def model_predict(train: pd.DataFrame, test: pd.DataFrame, features: list[str]) 
 
 
 def pooled_walk_forward(data: pd.DataFrame) -> pd.DataFrame:
+    """Walk forward using only down-day candidates for both training and scoring."""
     results = []
-    tech = BASE_FEATURES
     v1 = BASE_FEATURES + REGIME_FEATURES
     v2 = v1 + NEWS_FEATURES
-    for year in sorted(data.Date.dt.year.unique()):
-        train = data[data.Date.dt.year < year].copy()
-        test = data[data.Date.dt.year == year].copy()
+
+    candidate = data[data["ret"] <= SIGNAL_RETURN].copy()
+    for year in sorted(candidate.Date.dt.year.unique()):
+        train = candidate[candidate.Date.dt.year < year].copy()
+        test = candidate[candidate.Date.dt.year == year].copy()
         if len(train) < 500 or test.empty:
             continue
+
         p1 = model_predict(train, test, v1)
         p2 = model_predict(train, test, v2)
         test["prob_v1"] = p1.reindex(test.index)
         test["prob_v2"] = p2.reindex(test.index)
-        test["baseline_signal"] = test["ret"] <= -.02
-        test["v1_70"] = test["baseline_signal"] & (test["prob_v1"] >= .70)
-        test["v2_70"] = test["baseline_signal"] & (test["prob_v2"] >= .70)
+        test["baseline_signal"] = True
+
+        # Quantile thresholds are estimated strictly from prior candidate days.
         tr1 = model_predict(train, train, v1)
         tr2 = model_predict(train, train, v2)
-        base = train["ret"] <= -.02
-        thr1 = tr1[base.reindex(tr1.index, fill_value=False)].quantile(.80) if len(tr1) else float("nan")
-        thr2 = tr2[base.reindex(tr2.index, fill_value=False)].quantile(.80) if len(tr2) else float("nan")
-        test["v1_top20"] = test["baseline_signal"] & (test["prob_v1"] >= thr1)
-        test["v2_top20"] = test["baseline_signal"] & (test["prob_v2"] >= thr2)
+        thr1 = tr1.quantile(.80) if len(tr1) else float("nan")
+        thr2 = tr2.quantile(.80) if len(tr2) else float("nan")
+        test["v1_70"] = test["prob_v1"] >= .70
+        test["v2_70"] = test["prob_v2"] >= .70
+        test["v1_top20"] = test["prob_v1"] >= thr1
+        test["v2_top20"] = test["prob_v2"] >= thr2
         results.append(test)
     return pd.concat(results, ignore_index=True) if results else pd.DataFrame()
 
@@ -130,9 +141,14 @@ def main() -> None:
             benchmark = d
         else:
             frames[item["symbol"]] = merge_news(d, news, item["symbol"])
+    if benchmark is None:
+        raise RuntimeError("Benchmark data missing")
     frames = add_market_regime(frames, benchmark)
     all_data = pd.concat([d.assign(symbol=s) for s, d in frames.items()], ignore_index=True)
     scored = pooled_walk_forward(all_data)
+    if scored.empty:
+        raise RuntimeError("No out-of-sample candidate rows were scored")
+
     rows = []
     for symbol in frames:
         s = scored[scored.symbol == symbol]
