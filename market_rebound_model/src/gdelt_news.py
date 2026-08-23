@@ -26,8 +26,8 @@ def _parse_seen_date(value: str) -> pd.Timestamp:
 class GdeltNewsProvider(NewsProvider):
     name = "gdelt"
 
-    def __init__(self, pause: float = 1.0, max_records: int = 250, timeout: int = 30, retries: int = 4):
-        self.pause = max(pause, 0.25)
+    def __init__(self, pause: float = 1.0, max_records: int = 250, timeout: int = 30, retries: int = 5):
+        self.pause = max(pause, 0.5)
         self.max_records = min(max_records, 250)
         self.timeout = timeout
         self.retries = retries
@@ -54,6 +54,16 @@ class GdeltNewsProvider(NewsProvider):
         for attempt in range(self.retries + 1):
             try:
                 response = self.session.get(API, params=params, timeout=self.timeout)
+                status = response.status_code
+                if status in (429, 500, 502, 503, 504):
+                    retry_after = response.headers.get("Retry-After", "")
+                    try:
+                        wait = float(retry_after)
+                    except (TypeError, ValueError):
+                        wait = min(2 ** attempt, 30)
+                    raise RuntimeError(
+                        f"GDELT transient HTTP {status}; retry_after={wait:g}s"
+                    )
                 response.raise_for_status()
                 try:
                     payload = response.json()
@@ -61,7 +71,7 @@ class GdeltNewsProvider(NewsProvider):
                     content_type = response.headers.get("content-type", "")
                     body = response.text.strip().replace("\n", " ")[:500]
                     raise RuntimeError(
-                        f"GDELT returned non-JSON content: status={response.status_code} "
+                        f"GDELT returned non-JSON content: status={status} "
                         f"content_type={content_type!r} body={body!r}"
                     ) from exc
                 if not isinstance(payload, dict):
@@ -71,7 +81,13 @@ class GdeltNewsProvider(NewsProvider):
                 last_error = exc
                 if attempt >= self.retries:
                     break
-                time.sleep(min(2 ** attempt, 8))
+                # Keep normal requests gentle and give transient/rate-limit responses
+                # progressively more time before the next attempt.
+                if isinstance(exc, RuntimeError) and "retry_after=" in str(exc):
+                    wait = float(str(exc).split("retry_after=", 1)[1].split("s", 1)[0])
+                else:
+                    wait = min(2 ** attempt, 8)
+                time.sleep(max(wait, self.pause))
         raise RuntimeError(
             f"GDELT request failed for {symbol} {start.isoformat()} -> {end.isoformat()}: {last_error}"
         ) from last_error
@@ -107,7 +123,7 @@ class GdeltNewsProvider(NewsProvider):
                 "headline": article.get("title", ""),
                 "source": article.get("domain", ""),
                 "url": article.get("url", ""),
-                "summary": article.get("socialimage", "") or "",
+                "summary": "",
                 "category": "",
                 "sentiment": pd.NA,
                 "intensity": pd.NA,
