@@ -70,3 +70,23 @@ def test_merge_news_fills_missing_days_without_lookahead():
     out = merge_news(market, news, "NVDA")
     assert out.loc[out["Date"] == pd.Timestamp("2026-08-18"), "news_count"].iloc[0] == 0
     assert out.loc[out["Date"] == pd.Timestamp("2026-08-19"), "news_count"].iloc[0] == 4
+
+
+def test_merge_news_maps_weekend_news_to_next_market_session():
+    market = pd.DataFrame({
+        "Date": pd.to_datetime(["2026-08-21", "2026-08-24"]),
+        "Ultimo": [100.0, 98.0], "Apertura": [100.0, 100.0],
+        "Massimo": [101.0, 99.0], "Minimo": [99.0, 97.0], "Vol.": [1000, 1100],
+    })
+    from src.rebound_model import engineer_features
+    market = engineer_features(market)
+    news = pd.DataFrame([{
+        "Date": pd.Timestamp("2026-08-22"), "symbol": "NVDA",
+        "news_sentiment": -3.0, "news_intensity": 3.0, "news_relevance": 1.0,
+        "news_novelty": 0.0, "news_count": 2, "negative_news_share": 1.0,
+        "material_event_share": 1.0, "event_polarity": -1.0,
+        "event_intensity": 1.0, "unique_event_types": 2, "news_available": 1.0,
+    }])
+    out = merge_news(market, news, "NVDA")
+    assert out.loc[out["Date"] == pd.Timestamp("2026-08-21"), "news_count"].iloc[0] == 0
+    assert out.loc[out["Date"] == pd.Timestamp("2026-08-24"), "news_count"].iloc[0] == 2
