@@ -58,11 +58,7 @@ def load_news(path: str | Path) -> pd.DataFrame:
 
 
 def merge_news(market: pd.DataFrame, news: pd.DataFrame, symbol: str) -> pd.DataFrame:
-    """Merge news to the first market session on/after its availability date.
-
-    This preserves post-close news when it lands on weekends/holidays instead
-    of silently dropping it because there is no market row on that calendar day.
-    """
+    """Merge news to the first market session on/after its availability date."""
     x = market.copy()
     x["Date"] = pd.to_datetime(x["Date"], errors="coerce").dt.normalize()
     x = x.sort_values("Date")
@@ -70,20 +66,23 @@ def merge_news(market: pd.DataFrame, news: pd.DataFrame, symbol: str) -> pd.Data
     n = news[news.symbol == symbol].copy()
     cols = ["Date", "symbol"] + [c for c in NEWS_FEATURES if c in n.columns]
     n = n[cols].drop_duplicates(["Date", "symbol"])
-    n["Date"] = pd.to_datetime(n["Date"], errors="coerce").dt.normalize()
-    n = n.dropna(subset=["Date"]).sort_values("Date")
+    n["available_date"] = pd.to_datetime(n["Date"], errors="coerce").dt.normalize()
+    n = n.dropna(subset=["available_date"]).sort_values("available_date")
 
     if not n.empty:
-        n = pd.merge_asof(n, x[["Date"]], on="Date", direction="forward").dropna(subset=["Date"])
-        n = n.rename(columns={"Date_x": "available_date", "Date_y": "Date"}) if "Date_x" in n.columns else n
-        # merge_asof keeps the right key under the same name; preserve the mapped session.
-        if "available_date" not in n.columns:
-            # Reconstruct the original availability date from the left side if needed.
-            n["available_date"] = pd.NaT
-        agg_cols = [c for c in NEWS_FEATURES if c in n.columns]
-        n = n[["Date"] + agg_cols]
-        n = n.groupby("Date", as_index=False).agg({c: "sum" if c == "news_count" else "mean" for c in agg_cols})
-        x = x.merge(n, on="Date", how="left")
+        sessions = x[["Date"]].drop_duplicates().rename(columns={"Date": "session_date"})
+        mapped = pd.merge_asof(
+            n,
+            sessions,
+            left_on="available_date",
+            right_on="session_date",
+            direction="forward",
+        ).dropna(subset=["session_date"])
+        agg_cols = [c for c in NEWS_FEATURES if c in mapped.columns]
+        agg_spec = {c: ("sum" if c == "news_count" else "mean") for c in agg_cols}
+        mapped = mapped.groupby("session_date", as_index=False).agg(agg_spec)
+        mapped = mapped.rename(columns={"session_date": "Date"})
+        x = x.merge(mapped, on="Date", how="left")
 
     for c in NEWS_FEATURES:
         if c not in x.columns:
@@ -139,7 +138,6 @@ def pooled_walk_forward(data: pd.DataFrame) -> pd.DataFrame:
         test["prob_v2"] = p2.reindex(test.index)
         test["baseline_signal"] = True
 
-        # Thresholds are based only on prior out-of-sample predictions.
         prior_v1 = prior_oos_predictions(train, v1)
         prior_v2 = prior_oos_predictions(train, v2)
         thr1 = prior_v1.quantile(.80) if len(prior_v1) else float("nan")
