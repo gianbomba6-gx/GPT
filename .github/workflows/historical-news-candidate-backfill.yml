@@ -1,0 +1,82 @@
+name: Historical candidate news backfill (GDELT GKG)
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: 'UTC start date (YYYY-MM-DD)'
+        required: true
+        default: '2020-01-01'
+      end_date:
+        description: 'UTC end date (YYYY-MM-DD)'
+        required: true
+        default: '2026-08-19'
+      threshold:
+        description: 'Down-day return threshold'
+        required: true
+        default: '-0.02'
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Validate date range and GKG availability
+        env:
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+        run: |
+          python - <<'PY'
+          import os, re, requests
+          from datetime import date
+          start = date.fromisoformat(os.environ['START_DATE'])
+          end = date.fromisoformat(os.environ['END_DATE'])
+          if end < start:
+              raise SystemExit('end_date must be on or after start_date')
+          html = requests.get('https://data.gdeltproject.org/gkg/index.html', timeout=30).text
+          days = [date(int(m[:4]), int(m[4:6]), int(m[6:8])) for m in re.findall(r'href="(\d{8})\.gkg\.csv\.zip"', html)]
+          if not days:
+              raise SystemExit('Could not determine latest GKG archive')
+          latest = max(days)
+          if end > latest:
+              raise SystemExit(f'GKG archive not yet available through {end}; latest published archive is {latest}')
+          print(f'VALIDATED range={start}..{end} latest_gkg={latest}')
+          PY
+      - name: Candidate GKG backfill
+        env:
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+          THRESHOLD: ${{ inputs.threshold }}
+        run: |
+          python src/gkg_candidate_backfill.py \
+            --start "$START_DATE" \
+            --end "$END_DATE" \
+            --threshold "$THRESHOLD" \
+            --out-raw results/news_candidate_raw.csv \
+            --out-daily results/news_candidate_daily.csv
+      - name: Validate candidate dataset
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          raw = pd.read_csv('results/news_candidate_raw.csv')
+          daily = pd.read_csv('results/news_candidate_daily.csv')
+          if raw.empty or daily.empty:
+              raise SystemExit('Candidate news dataset is empty')
+          print(f'RAW rows={len(raw)} DAILY rows={len(daily)}')
+          print('raw by symbol:')
+          print(raw.groupby('symbol').size().to_string())
+          print('daily by symbol:')
+          print(daily.groupby('symbol').size().to_string())
+      - uses: actions/upload-artifact@v4
+        with:
+          name: historical-candidate-news
+          path: |
+            market_rebound_model/results/news_candidate_raw.csv
+            market_rebound_model/results/news_candidate_daily.csv
