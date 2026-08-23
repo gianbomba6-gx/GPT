@@ -1,4 +1,9 @@
-"""Historical GDELT GKG daily news features."""
+"""Historical GDELT GKG news features.
+
+Supports both legacy GKG 1.0 daily files (11 columns) and GKG 2.x
+27-column files. The public daily ``gkg.csv.zip`` archive currently uses
+the legacy 11-column layout, so this distinction is important.
+"""
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -18,20 +23,29 @@ GKG_COLUMNS = [
     "RelatedImages", "SocialImageEmbeds", "SocialVideoEmbeds", "Quotations",
     "AllNames", "Amounts", "TranslationInfo", "Extras",
 ]
+
+GKG1_COLUMNS = [
+    "DATE", "NUMARTS", "COUNTS", "THEMES", "LOCATIONS", "PERSONS",
+    "ORGANIZATIONS", "TONE", "CAMEOEVENTIDS", "SOURCES", "SOURCEURLS",
+]
+
 COMPACT_COLUMNS = [
     "DATE", "DocumentIdentifier", "SourceCommonName", "V2Counts", "V2Themes",
     "V2Locations", "V2Persons", "V2Organizations", "V2Tone", "AllNames", "Extras",
 ]
+
 NORMALIZED_COLUMNS = [
     "published_at", "symbol", "headline", "source", "url", "summary",
     "category", "sentiment", "intensity", "relevance", "novelty",
 ]
+
 SYMBOL_ORGANIZATIONS = {
     "STLAM.MI": ("stellantis", "stellantis nv", "stellantis n.v.", "fiat chrysler", "fiat chrysler automobiles"),
     "SPCX": ("spacex", "space exploration technologies", "space exploration technologies corp"),
     "NVDA": ("nvidia", "nvidia corporation", "nvidia corp"),
     "TSLA": ("tesla", "tesla motors", "tesla inc", "tesla, inc"),
 }
+
 GKG_BASE = "https://data.gdeltproject.org/gkg/{day}.gkg.csv.zip"
 _TONE_RE = re.compile(r"^-?\d+(?:\.\d+)?(?:,-?\d+(?:\.\d+)?){2,}")
 
@@ -47,6 +61,15 @@ def _tone(value: object) -> float | None:
         return float(str(value).split(",", 1)[0])
     except (TypeError, ValueError):
         return None
+
+
+def _parse_gkg_date(value: object) -> pd.Timestamp:
+    text = str(value or "").strip()
+    for fmt in ("%Y%m%d%H%M%S", "%Y%m%d"):
+        parsed = pd.to_datetime(text, format=fmt, utc=True, errors="coerce")
+        if not pd.isna(parsed):
+            return parsed
+    return pd.NaT
 
 
 def _org_names(value: object) -> list[str]:
@@ -71,7 +94,7 @@ def _matches_row(row: pd.Series, aliases: tuple[str, ...]) -> bool:
 def _row_to_article(row: pd.Series, aliases: tuple[str, ...], symbol: str) -> dict | None:
     if not _matches_row(row, aliases):
         return None
-    published = pd.to_datetime(str(row["DATE"]), format="%Y%m%d%H%M%S", utc=True, errors="coerce")
+    published = _parse_gkg_date(row["DATE"])
     if pd.isna(published):
         return None
     tone = _tone(row["V2Tone"])
@@ -117,36 +140,43 @@ class GkgHistoricalProvider:
                 width = len(next(csv.reader([first_line], delimiter="\t")))
                 fh.seek(0)
                 if width == len(GKG_COLUMNS):
-                    df = pd.read_csv(
+                    raw = pd.read_csv(
                         fh, sep="\t", header=None, names=GKG_COLUMNS,
                         usecols=[1, 3, 4, 8, 13, 14, 15, 23], dtype=str,
                         keep_default_na=False, na_filter=False,
                     )
+                    df = raw
+                elif width == len(GKG1_COLUMNS):
+                    raw = pd.read_csv(
+                        fh, sep="\t", header=None, names=GKG1_COLUMNS,
+                        dtype=str, keep_default_na=False, na_filter=False,
+                    )
+                    df = pd.DataFrame({
+                        "DATE": raw["DATE"],
+                        "SourceCommonName": raw["SOURCES"],
+                        "DocumentIdentifier": raw["SOURCEURLS"],
+                        "V2Themes": raw["THEMES"],
+                        "Organizations": raw["ORGANIZATIONS"],
+                        "V2Organizations": "",
+                        "V2Tone": raw["TONE"],
+                        "AllNames": "",
+                    })
                 elif width == len(COMPACT_COLUMNS):
-                    df = pd.read_csv(
+                    raw = pd.read_csv(
                         fh, sep="\t", header=None, names=COMPACT_COLUMNS,
                         dtype=str, keep_default_na=False, na_filter=False,
                     )
+                    df = raw.assign(Organizations="")[[
+                        "DATE", "SourceCommonName", "DocumentIdentifier", "V2Themes",
+                        "Organizations", "V2Organizations", "V2Tone", "AllNames",
+                    ]]
                 else:
                     raise RuntimeError(
-                        f"Unsupported GDELT GKG row width for {day_s}: found {width}; expected {len(GKG_COLUMNS)} or {len(COMPACT_COLUMNS)}"
+                        f"Unsupported GDELT GKG row width for {day_s}: found {width}; "
+                        f"expected {len(GKG_COLUMNS)} (GKG 2.x) or {len(GKG1_COLUMNS)} (GKG 1.0)"
                     )
         if df.empty:
             raise RuntimeError(f"Empty GKG data file for {day_s}")
-        if list(df.columns) == GKG_COLUMNS[:]:
-            pass
-        else:
-            df = df.rename(columns={
-                "V2Organizations": "V2Organizations",
-                "V2Tone": "V2Tone",
-                "V2Themes": "V2Themes",
-                "SourceCommonName": "SourceCommonName",
-                "DocumentIdentifier": "DocumentIdentifier",
-                "DATE": "DATE",
-            })
-            for col in ("Organizations", "AllNames"):
-                if col not in df.columns:
-                    df[col] = ""
         self._day_cache[day_s] = df
         return df
 
@@ -164,7 +194,9 @@ class GkgHistoricalProvider:
         if not rows:
             return pd.DataFrame(columns=NORMALIZED_COLUMNS)
         out = pd.DataFrame(rows)
-        return out[NORMALIZED_COLUMNS].drop_duplicates(subset=["published_at", "url", "symbol"]).reset_index(drop=True)
+        return out[NORMALIZED_COLUMNS].drop_duplicates(
+            subset=["published_at", "url", "symbol"]
+        ).reset_index(drop=True)
 
     def fetch(self, symbol: str, start: date, end: date) -> pd.DataFrame:
         if end < start:
@@ -175,4 +207,7 @@ class GkgHistoricalProvider:
             print(f"GKG {symbol}: {cursor.isoformat()}")
             frames.append(self.fetch_day(symbol, cursor))
             cursor += timedelta(days=1)
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=NORMALIZED_COLUMNS)
+        return (
+            pd.concat(frames, ignore_index=True)
+            if frames else pd.DataFrame(columns=NORMALIZED_COLUMNS)
+        )
