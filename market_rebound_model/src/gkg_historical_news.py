@@ -1,22 +1,19 @@
-"""Historical GDELT GKG daily news features (2013-present)."""
+"""Historical GDELT GKG daily news features (2013-present).
+
+The public daily GKG archives have appeared with slightly different field
+layouts over time. We therefore parse rows semantically rather than requiring
+one fixed column count, while still extracting the fields needed by the model.
+"""
 from __future__ import annotations
 
 from datetime import date, timedelta
 from io import BytesIO
+import csv
 import re
 import zipfile
 
 import pandas as pd
 import requests
-
-GKG_COLUMNS = [
-    "GKGRECORDID", "DATE", "SourceCollectionIdentifier", "SourceCommonName",
-    "DocumentIdentifier", "Counts", "V2Counts", "Themes", "V2Themes",
-    "Locations", "V2Locations", "Persons", "V2Persons", "Organizations",
-    "V2Organizations", "V2Tone", "Dates", "GCAM", "SharingImage",
-    "RelatedImages", "SocialImageEmbeds", "SocialVideoEmbeds", "Quotations",
-    "AllNames", "Amounts", "TranslationInfo", "Extras",
-]
 
 NORMALIZED_COLUMNS = [
     "published_at", "symbol", "headline", "source", "url", "summary",
@@ -31,6 +28,11 @@ SYMBOL_ORGANIZATIONS = {
 }
 
 GKG_BASE = "https://data.gdeltproject.org/gkg/{day}.gkg.csv.zip"
+_TIMESTAMP_RE = re.compile(r"^\d{14}$")
+_RECORD_RE = re.compile(r"^\d{14}-(?:T?\d+)$")
+_TONE_RE = re.compile(r"^-?\d+(?:\.\d+)?(?:,-?\d+(?:\.\d+)?){2,}")
+_URL_RE = re.compile(r"^https?://", re.I)
+_DOMAIN_RE = re.compile(r"^[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?::\d+)?$")
 
 
 def _tone(value: object) -> float | None:
@@ -52,19 +54,55 @@ def _matches(text: object, terms: tuple[str, ...]) -> bool:
     )
 
 
+def _extract_row(fields: list[str], terms: tuple[str, ...]) -> dict | None:
+    if len(fields) < 4:
+        return None
+    values = [str(x or "").strip() for x in fields]
+
+    record_idx = next((i for i, v in enumerate(values[:4]) if _RECORD_RE.match(v)), None)
+    date_idx = next((i for i, v in enumerate(values[:6]) if _TIMESTAMP_RE.match(v)), None)
+    if date_idx is None:
+        return None
+
+    url_idx = next((i for i, v in enumerate(values) if _URL_RE.match(v)), None)
+    source_idx = next((i for i, v in enumerate(values[:8]) if _DOMAIN_RE.match(v)), None)
+
+    entity_candidates = [v for v in values if _matches(v, terms)]
+    if not entity_candidates:
+        return None
+    org_value = max(entity_candidates, key=lambda v: (v.count(";"), v.count(","), len(v)))
+
+    tone_value = next((v for v in values if _TONE_RE.match(v)), "")
+    themes_candidates = [
+        v for v in values
+        if ";" in v and any(token in v.upper() for token in ("ECON_", "TAX_", "CRISISLEX", "WB_"))
+    ]
+    summary = max(themes_candidates, key=len) if themes_candidates else ""
+
+    return {
+        "published_at": pd.to_datetime(values[date_idx], format="%Y%m%d%H%M%S", utc=True, errors="coerce"),
+        "headline": "",
+        "source": values[source_idx] if source_idx is not None else "",
+        "url": values[url_idx] if url_idx is not None else "",
+        "summary": summary,
+        "sentiment": _tone(tone_value),
+        "_record_id": values[record_idx] if record_idx is not None else "",
+    }
+
+
 class GkgHistoricalProvider:
     """Download one daily GKG file and extract company-level news metadata."""
 
-    def __init__(self, timeout: int = 60):
+    def __init__(self, timeout: int = 90):
         self.timeout = timeout
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": "market-rebound-model/1.0 (GDELT GKG client)",
             "Accept": "application/zip, application/octet-stream;q=0.9, */*;q=0.8",
         })
-        self._day_cache: dict[str, pd.DataFrame] = {}
+        self._day_cache: dict[str, list[list[str]]] = {}
 
-    def _load_day(self, day: date) -> pd.DataFrame:
+    def _load_day(self, day: date) -> list[list[str]]:
         day_s = day.strftime("%Y%m%d")
         if day_s in self._day_cache:
             return self._day_cache[day_s]
@@ -75,49 +113,43 @@ class GkgHistoricalProvider:
             if not members:
                 raise RuntimeError(f"Empty GKG archive for {day_s}")
             with zf.open(members[0]) as fh:
-                df = pd.read_csv(
-                    fh,
-                    sep="\t",
-                    names=GKG_COLUMNS,
-                    usecols=[
-                        "DATE", "SourceCommonName", "DocumentIdentifier", "Themes",
-                        "V2Themes", "Organizations", "V2Organizations", "V2Tone",
-                    ],
-                    dtype=str,
-                    on_bad_lines="skip",
-                    low_memory=False,
-                )
-        self._day_cache[day_s] = df
-        return df
+                rows = [row for row in csv.reader((line.decode("utf-8", "replace") for line in fh), delimiter="\t")]
+        if not rows:
+            raise RuntimeError(f"Empty GKG data file for {day_s}")
+        widths = pd.Series([len(r) for r in rows[:2000]]).value_counts().to_dict()
+        dominant = max(widths, key=widths.get)
+        if dominant < 4:
+            raise RuntimeError(f"GDELT GKG archive {day_s} has invalid row width distribution: {widths}")
+        self._day_cache[day_s] = rows
+        return rows
 
     def fetch_day(self, symbol: str, day: date) -> pd.DataFrame:
         symbol = symbol.upper()
         terms = SYMBOL_ORGANIZATIONS.get(symbol)
         if not terms:
             raise ValueError(f"No GKG organization mapping for {symbol}")
-        df = self._load_day(day)
-        org_mask = (
-            df["Organizations"].map(lambda x: _matches(x, terms))
-            | df["V2Organizations"].map(lambda x: _matches(x, terms))
-        )
-        out = df.loc[org_mask].copy()
-        if out.empty:
+        rows = self._load_day(day)
+        out_rows = []
+        for fields in rows:
+            item = _extract_row(fields, terms)
+            if item is None or pd.isna(item["published_at"]):
+                continue
+            item.update({
+                "symbol": symbol,
+                "category": "gkg",
+                "intensity": abs(item["sentiment"]) if item["sentiment"] is not None else None,
+                "relevance": 1.0,
+                "novelty": pd.NA,
+            })
+            out_rows.append(item)
+        if not out_rows:
             return pd.DataFrame(columns=NORMALIZED_COLUMNS)
-        out["published_at"] = pd.to_datetime(out["DATE"], format="%Y%m%d%H%M%S", utc=True, errors="coerce")
-        out["symbol"] = symbol
-        out["headline"] = ""
-        out["source"] = out["SourceCommonName"].fillna("")
-        out["url"] = out["DocumentIdentifier"].fillna("")
-        out["summary"] = out["V2Themes"].fillna(out["Themes"]).fillna("")
-        out["category"] = "gkg"
-        out["sentiment"] = out["V2Tone"].map(_tone)
-        out["intensity"] = out["sentiment"].abs()
-        out["relevance"] = 1.0
-        out["novelty"] = pd.NA
+        out = pd.DataFrame(out_rows)
         return (
             out[NORMALIZED_COLUMNS]
             .dropna(subset=["published_at"])
-            .drop_duplicates(subset=["published_at", "url"])
+            .drop_duplicates(subset=["published_at", "url", "symbol"])
+            .reset_index(drop=True)
         )
 
     def fetch(self, symbol: str, start: date, end: date) -> pd.DataFrame:
