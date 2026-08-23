@@ -4,8 +4,12 @@ import argparse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import pandas as pd
-from .gdelt_news import GdeltNewsProvider
-from .news_provider import NewsQuery, NORMALIZED_COLUMNS
+try:
+    from .gdelt_news import GdeltNewsProvider
+    from .news_provider import NewsQuery, NORMALIZED_COLUMNS
+except ImportError:
+    from gdelt_news import GdeltNewsProvider
+    from news_provider import NewsQuery, NORMALIZED_COLUMNS
 
 DEFAULT_SYMBOLS = ["STLAM.MI", "SPCX", "NVDA", "TSLA"]
 
@@ -15,19 +19,9 @@ def run(symbols: list[str], start: datetime, end: datetime, out: str, pause: flo
     out_path = Path(out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint = out_path.with_suffix(out_path.suffix + ".checkpoint.csv")
-    if checkpoint.exists():
-        existing = pd.read_csv(checkpoint)
-    elif out_path.exists():
-        existing = pd.read_csv(out_path)
-    else:
-        existing = pd.DataFrame(columns=NORMALIZED_COLUMNS)
-    completed = set()
-    if not existing.empty and "_window_key" in existing.columns:
-        completed = set(existing["_window_key"].astype(str))
-    chunks = []
-    if not existing.empty:
-        chunks.append(existing.drop(columns=["_window_key"], errors="ignore"))
-
+    existing = pd.read_csv(checkpoint) if checkpoint.exists() else (pd.read_csv(out_path) if out_path.exists() else pd.DataFrame(columns=NORMALIZED_COLUMNS))
+    completed = set(existing.get("_window_key", pd.Series(dtype=str)).astype(str))
+    chunks = [existing.drop(columns=["_window_key"], errors="ignore")] if not existing.empty else []
     cursor = start
     while cursor < end:
         w_end = min(cursor + timedelta(days=window_days), end)
@@ -36,9 +30,7 @@ def run(symbols: list[str], start: datetime, end: datetime, out: str, pause: flo
             if key in completed:
                 continue
             print(f"GDELT {symbol}: {cursor.date()} -> {w_end.date()}")
-            q = NewsQuery(symbol=symbol, start=cursor, end=w_end)
-            df = provider.fetch(q)
-            df = df.copy()
+            df = provider.fetch(NewsQuery(symbol=symbol, start=cursor, end=w_end)).copy()
             df["_window_key"] = key
             chunks.append(df)
             completed.add(key)
@@ -49,9 +41,7 @@ def run(symbols: list[str], start: datetime, end: datetime, out: str, pause: flo
             ).to_csv(out_path, index=False)
             print(f"  articles={len(df)}")
         cursor = w_end
-
-    final = pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame(columns=NORMALIZED_COLUMNS)
-    final = final.drop(columns=["_window_key"], errors="ignore").drop_duplicates(
+    final = pd.concat(chunks, ignore_index=True).drop(columns=["_window_key"], errors="ignore").drop_duplicates(
         subset=["published_at", "symbol", "headline", "url"]
     )
     final.to_csv(out_path, index=False)
