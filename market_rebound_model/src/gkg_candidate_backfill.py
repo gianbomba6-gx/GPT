@@ -140,6 +140,10 @@ def run(symbols: list[str], start: str, end: str, threshold: float, out_raw: str
             post_close = int((pd.to_datetime(symbol_df["published_at"], utc=True, errors="coerce") > cutoff).sum())
             print(f"NEWS {symbol} {day}: {len(symbol_df)} articles; post-close={post_close}")
 
+    if provider.missing_days:
+        print(f"GKG MISSING ARCHIVES: {len(provider.missing_days)}")
+        print("GKG MISSING DAYS: " + ",".join(provider.missing_days))
+
     raw = pd.concat(raw_chunks, ignore_index=True) if raw_chunks else pd.DataFrame()
     raw_path = Path(out_raw)
     daily_path = Path(out_daily)
