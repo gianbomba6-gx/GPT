@@ -52,41 +52,49 @@ def test_aggregate_daily_uses_candidate_day_and_event_features():
     assert out.iloc[0]["news_available"] == 1
 
 
-def test_merge_news_fills_missing_days_without_lookahead():
+def _base_market_dates(values):
     market = pd.DataFrame({
-        "Date": pd.to_datetime(["2026-08-18", "2026-08-19"]),
+        "Date": values,
         "Ultimo": [100.0, 98.0], "Apertura": [100.0, 100.0],
         "Massimo": [101.0, 99.0], "Minimo": [99.0, 97.0], "Vol.": [1000, 1100],
     })
     from src.rebound_model import engineer_features
-    market = engineer_features(market)
-    news = pd.DataFrame([{
-        "Date": pd.Timestamp("2026-08-19"), "symbol": "NVDA",
+    return engineer_features(market)
+
+
+def _news_row(day):
+    return {
+        "Date": day, "symbol": "NVDA",
         "news_sentiment": -2.0, "news_intensity": 2.0, "news_relevance": 1.0,
         "news_novelty": 0.0, "news_count": 4, "negative_news_share": 1.0,
         "material_event_share": 1.0, "event_polarity": -1.0,
         "event_intensity": 1.0, "unique_event_types": 2, "news_available": 1.0,
-    }])
+    }
+
+
+def test_merge_news_fills_missing_days_without_lookahead():
+    market = _base_market_dates(pd.to_datetime(["2026-08-18", "2026-08-19"]))
+    news = pd.DataFrame([_news_row(pd.Timestamp("2026-08-19"))])
     out = merge_news(market, news, "NVDA")
     assert out.loc[out["Date"] == pd.Timestamp("2026-08-18"), "news_count"].iloc[0] == 0
     assert out.loc[out["Date"] == pd.Timestamp("2026-08-19"), "news_count"].iloc[0] == 4
 
 
 def test_merge_news_maps_weekend_news_to_next_market_session():
-    market = pd.DataFrame({
-        "Date": pd.to_datetime(["2026-08-21", "2026-08-24"]),
-        "Ultimo": [100.0, 98.0], "Apertura": [100.0, 100.0],
-        "Massimo": [101.0, 99.0], "Minimo": [99.0, 97.0], "Vol.": [1000, 1100],
-    })
-    from src.rebound_model import engineer_features
-    market = engineer_features(market)
-    news = pd.DataFrame([{
-        "Date": pd.Timestamp("2026-08-22"), "symbol": "NVDA",
-        "news_sentiment": -3.0, "news_intensity": 3.0, "news_relevance": 1.0,
-        "news_novelty": 0.0, "news_count": 2, "negative_news_share": 1.0,
-        "material_event_share": 1.0, "event_polarity": -1.0,
-        "event_intensity": 1.0, "unique_event_types": 2, "news_available": 1.0,
-    }])
+    market = _base_market_dates(pd.to_datetime(["2026-08-21", "2026-08-24"]))
+    news = pd.DataFrame([_news_row(pd.Timestamp("2026-08-22"))])
+    news.loc[:, "news_count"] = 2
+    news.loc[:, "news_sentiment"] = -3.0
+    news.loc[:, "news_intensity"] = 3.0
     out = merge_news(market, news, "NVDA")
     assert out.loc[out["Date"] == pd.Timestamp("2026-08-21"), "news_count"].iloc[0] == 0
     assert out.loc[out["Date"] == pd.Timestamp("2026-08-24"), "news_count"].iloc[0] == 2
+
+
+def test_merge_news_normalizes_pandas_datetime_resolution_before_asof_merge():
+    market_dates = pd.Series(pd.to_datetime(["2026-08-18", "2026-08-19"]).astype("datetime64[ns]"))
+    news_dates = pd.Series(pd.to_datetime(["2026-08-19"]).astype("datetime64[s]"))
+    market = _base_market_dates(market_dates)
+    news = pd.DataFrame([_news_row(news_dates.iloc[0])])
+    out = merge_news(market, news, "NVDA")
+    assert out.loc[out["Date"] == pd.Timestamp("2026-08-19"), "news_count"].iloc[0] == 4
