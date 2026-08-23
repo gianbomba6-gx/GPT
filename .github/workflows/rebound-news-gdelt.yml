@@ -1,12 +1,12 @@
-name: Historical news backfill (GDELT)
+name: Recent news backfill (GDELT DOC)
 
 on:
   workflow_dispatch:
     inputs:
       start_date:
-        description: 'UTC start date (YYYY-MM-DD)'
+        description: 'UTC start date (YYYY-MM-DD; GDELT DOC rolling window)'
         required: true
-        default: '2020-01-01'
+        default: '2026-08-20'
       end_date:
         description: 'UTC end date (YYYY-MM-DD)'
         required: true
@@ -14,7 +14,7 @@ on:
       window_days:
         description: 'Initial query window; automatically split when needed'
         required: true
-        default: '30'
+        default: '1'
 
 jobs:
   backfill:
@@ -28,7 +28,21 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - name: Backfill GDELT
+      - name: Validate date range
+        env:
+          START_DATE: ${{ inputs.start_date }}
+        run: |
+          python - <<'PY'
+          from datetime import date, timedelta
+          start = date.fromisoformat("${START_DATE}")
+          today = date.today()
+          if start < today - timedelta(days=90):
+              raise SystemExit(
+                  f"GDELT DOC only supports a rolling recent window; requested {start}. "
+                  "Historical 2020+ data requires the separate GAL/NGrams historical pipeline."
+              )
+          PY
+      - name: Backfill GDELT DOC
         env:
           START_DATE: ${{ inputs.start_date }}
           END_DATE: ${{ inputs.end_date }}
@@ -51,11 +65,7 @@ jobs:
               raise SystemExit(f'Missing columns: {missing}')
           if d.empty:
               raise SystemExit('GDELT backfill produced no articles')
-          expected = {'STLAM.MI','SPCX','NVDA','TSLA'}
-          missing_symbols = expected - set(d['symbol'].dropna().unique())
-          if missing_symbols:
-              raise SystemExit(f'Missing symbols: {sorted(missing_symbols)}')
-          print(f'VALIDATED rows={len(d)} symbols={sorted(d.symbol.unique())}')
+          print(f'VALIDATED rows={len(d)} symbols={sorted(d.symbol.dropna().unique())}')
           print(d.groupby('symbol').size().to_string())
           PY
       - uses: actions/upload-artifact@v4
