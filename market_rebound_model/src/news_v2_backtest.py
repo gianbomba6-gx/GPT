@@ -1,0 +1,156 @@
+"""Walk-forward comparison of V1 vs V2 with causal news features."""
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import pandas as pd
+from sklearn.ensemble import HistGradientBoostingClassifier
+import yfinance as yf
+
+from rebound_model import BASE_FEATURES, load_yahoo_ohlcv
+from live_alert import add_market_regime, REGIME_FEATURES
+
+ROOT = Path(__file__).resolve().parents[1]
+CONFIG = json.loads((ROOT / "config" / "tickers.json").read_text())
+TARGET = "target_3"
+NEWS_FEATURES = [
+    "news_sentiment", "news_intensity", "news_relevance", "news_novelty",
+    "news_count", "negative_news_share", "material_event_share",
+    "event_polarity", "event_intensity", "unique_event_types", "news_available",
+]
+
+
+def fetch(symbol: str) -> pd.DataFrame:
+    x = yf.download(symbol, period="max", interval="1d", auto_adjust=False, progress=False)
+    if x.empty:
+        raise RuntimeError(f"No Yahoo data for {symbol}")
+    if isinstance(x.columns, pd.MultiIndex):
+        x.columns = x.columns.get_level_values(0)
+    x = x.rename(columns={"Close":"Ultimo", "Open":"Apertura", "High":"Massimo", "Low":"Minimo", "Volume":"Vol."})
+    x["Date"] = pd.to_datetime(x.index).tz_localize(None).normalize()
+    return x.reset_index(drop=True)[["Date","Ultimo","Apertura","Massimo","Minimo","Vol."]]
+
+
+def load_news(path: str | Path) -> pd.DataFrame:
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(p)
+    d = pd.read_csv(p)
+    if d.empty:
+        return pd.DataFrame(columns=["Date", "symbol", *NEWS_FEATURES])
+    d["Date"] = pd.to_datetime(d["Date"], errors="coerce").dt.normalize()
+    d["symbol"] = d["symbol"].astype(str).str.upper().str.strip()
+    for c in NEWS_FEATURES:
+        if c in d.columns:
+            d[c] = pd.to_numeric(d[c], errors="coerce")
+    if "news_available" not in d.columns:
+        d["news_available"] = 1.0
+    return d.dropna(subset=["Date", "symbol"])
+
+
+def merge_news(market: pd.DataFrame, news: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    x = market.copy()
+    n = news[news.symbol == symbol].copy()
+    cols = ["Date", "symbol"] + [c for c in NEWS_FEATURES if c in n.columns]
+    n = n[cols].drop_duplicates(["Date", "symbol"])
+    x = x.merge(n.drop(columns=["symbol"]), on="Date", how="left")
+    for c in NEWS_FEATURES:
+        if c not in x.columns:
+            x[c] = 0.0
+        x[c] = pd.to_numeric(x[c], errors="coerce").fillna(0.0)
+    x["news_available"] = x["news_available"].astype(float)
+    return x
+
+
+def model_predict(train: pd.DataFrame, test: pd.DataFrame, features: list[str]) -> pd.Series:
+    tr = train.dropna(subset=features + [TARGET])
+    te = test.dropna(subset=features)
+    if len(tr) < 500 or te.empty or tr[TARGET].nunique() < 2:
+        return pd.Series(dtype=float)
+    model = HistGradientBoostingClassifier(max_iter=250, max_leaf_nodes=15, learning_rate=.05, l2_regularization=2, random_state=42)
+    model.fit(tr[features], tr[TARGET].astype(int))
+    return pd.Series(model.predict_proba(te[features])[:, 1], index=te.index)
+
+
+def pooled_walk_forward(data: pd.DataFrame) -> pd.DataFrame:
+    results = []
+    tech = BASE_FEATURES
+    v1 = BASE_FEATURES + REGIME_FEATURES
+    v2 = v1 + NEWS_FEATURES
+    for year in sorted(data.Date.dt.year.unique()):
+        train = data[data.Date.dt.year < year].copy()
+        test = data[data.Date.dt.year == year].copy()
+        if len(train) < 500 or test.empty:
+            continue
+        p1 = model_predict(train, test, v1)
+        p2 = model_predict(train, test, v2)
+        test["prob_v1"] = p1.reindex(test.index)
+        test["prob_v2"] = p2.reindex(test.index)
+        test["baseline_signal"] = test["ret"] <= -.02
+        test["v1_70"] = test["baseline_signal"] & (test["prob_v1"] >= .70)
+        test["v2_70"] = test["baseline_signal"] & (test["prob_v2"] >= .70)
+        tr1 = model_predict(train, train, v1)
+        tr2 = model_predict(train, train, v2)
+        base = train["ret"] <= -.02
+        thr1 = tr1[base.reindex(tr1.index, fill_value=False)].quantile(.80) if len(tr1) else float("nan")
+        thr2 = tr2[base.reindex(tr2.index, fill_value=False)].quantile(.80) if len(tr2) else float("nan")
+        test["v1_top20"] = test["baseline_signal"] & (test["prob_v1"] >= thr1)
+        test["v2_top20"] = test["baseline_signal"] & (test["prob_v2"] >= thr2)
+        results.append(test)
+    return pd.concat(results, ignore_index=True) if results else pd.DataFrame()
+
+
+def stats(x: pd.DataFrame, label: str) -> dict:
+    x = x[x.next_ret.notna()].copy()
+    return {
+        "set": label,
+        "n": len(x),
+        "mean_next_ret": float(x.next_ret.mean()) if len(x) else None,
+        "median_next_ret": float(x.next_ret.median()) if len(x) else None,
+        "hit_2pct": float((x.next_ret >= .02).mean()) if len(x) else None,
+        "hit_3pct": float((x.next_ret >= .03).mean()) if len(x) else None,
+        "hit_5pct": float((x.next_ret >= .05).mean()) if len(x) else None,
+        "mean_next_high": float(x.next_high.mean()) if len(x) else None,
+    }
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("news_daily")
+    ap.add_argument("--out", default="results/latest_news_v2_backtest.csv")
+    args = ap.parse_args()
+    news = load_news(args.news_daily)
+    frames = {}
+    benchmark = None
+    for item in CONFIG["tickers"]:
+        d = load_yahoo_ohlcv(fetch(item["symbol"]))
+        if item["type"] == "benchmark":
+            benchmark = d
+        else:
+            frames[item["symbol"]] = merge_news(d, news, item["symbol"])
+    frames = add_market_regime(frames, benchmark)
+    all_data = pd.concat([d.assign(symbol=s) for s, d in frames.items()], ignore_index=True)
+    scored = pooled_walk_forward(all_data)
+    rows = []
+    for symbol in frames:
+        s = scored[scored.symbol == symbol]
+        rows += [
+            stats(s[s.baseline_signal], f"{symbol}: baseline -2%"),
+            stats(s[s.v1_70], f"{symbol}: V1 regime >=70%"),
+            stats(s[s.v2_70], f"{symbol}: V2 + news >=70%"),
+            stats(s[s.v1_top20], f"{symbol}: V1 regime top20%"),
+            stats(s[s.v2_top20], f"{symbol}: V2 + news top20%"),
+        ]
+    out = pd.DataFrame(rows)
+    p = ROOT / args.out
+    p.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(p, index=False)
+    scored.to_csv(ROOT / "results/latest_news_v2_oos_predictions.csv", index=False)
+    print(out.to_string(index=False))
+    print(f"Saved {p}")
+
+
+if __name__ == "__main__":
+    main()
