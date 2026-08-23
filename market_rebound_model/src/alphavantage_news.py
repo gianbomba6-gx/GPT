@@ -11,6 +11,8 @@ from news_provider import NewsQuery, NewsProvider, validate_articles
 BASE_URL = "https://www.alphavantage.co/query"
 MAP_PATH = Path(__file__).resolve().parents[1] / "config" / "news_symbol_map.json"
 
+EMPTY_COLUMNS = ["published_at","symbol","headline","source","url","summary","category","sentiment","intensity","relevance","novelty"]
+
 class AlphaVantageNewsProvider(NewsProvider):
     name = "alphavantage"
     def __init__(self, api_key: str | None = None, timeout: int = 30):
@@ -33,6 +35,15 @@ class AlphaVantageNewsProvider(NewsProvider):
         except KeyError as exc:
             raise ValueError(f"No Alpha Vantage news mapping configured for {symbol}") from exc
 
+    def validate_mapping(self, symbols: list[str]) -> None:
+        missing = [s for s in symbols if s not in self.symbol_map]
+        if missing:
+            raise ValueError(f"Missing Alpha Vantage news mappings: {missing}")
+        for symbol in symbols:
+            provider_symbol = self.provider_symbol(symbol)
+            if not provider_symbol.replace("-", "").replace("_", "").isalnum():
+                raise ValueError(f"Invalid Alpha Vantage NEWS_SENTIMENT ticker mapping: {symbol} -> {provider_symbol}")
+
     def fetch(self, query: NewsQuery) -> pd.DataFrame:
         original_symbol = query.symbol
         provider_symbol = self.provider_symbol(original_symbol)
@@ -53,8 +64,17 @@ class AlphaVantageNewsProvider(NewsProvider):
         if "feed" not in payload:
             safe_payload = {k: v for k, v in payload.items() if k.lower() not in {"apikey", "key"}}
             raise RuntimeError(f"Alpha Vantage response has no feed for {original_symbol} ({provider_symbol}): {safe_payload}")
+
         rows = []
         for item in payload["feed"]:
+            ticker_sentiment = None
+            for ts in item.get("ticker_sentiment", []) or []:
+                if str(ts.get("ticker", "")).upper() == provider_symbol.upper():
+                    ticker_sentiment = ts
+                    break
+            score = ticker_sentiment.get("ticker_sentiment_score") if ticker_sentiment else item.get("overall_sentiment_score")
+            relevance = ticker_sentiment.get("relevance_score") if ticker_sentiment else None
+            score_num = pd.to_numeric(score, errors="coerce")
             rows.append({
                 "published_at": item.get("time_published"),
                 "symbol": original_symbol,
@@ -63,13 +83,13 @@ class AlphaVantageNewsProvider(NewsProvider):
                 "url": item.get("url", ""),
                 "summary": item.get("summary", ""),
                 "category": item.get("category", "other"),
-                "sentiment": item.get("overall_sentiment_score"),
-                "intensity": None,
-                "relevance": None,
+                "sentiment": score_num,
+                "intensity": abs(score_num) if pd.notna(score_num) else None,
+                "relevance": pd.to_numeric(relevance, errors="coerce"),
                 "novelty": None,
             })
+        if not rows:
+            return pd.DataFrame(columns=EMPTY_COLUMNS)
         df = pd.DataFrame(rows)
-        if df.empty:
-            return pd.DataFrame(columns=["published_at","symbol","headline","source","url","summary","category","sentiment","intensity","relevance","novelty"])
         df["published_at"] = pd.to_datetime(df["published_at"], format="%Y%m%dT%H%M%S", utc=True, errors="coerce")
         return validate_articles(df, query)
