@@ -1,17 +1,15 @@
-"""Alpha Vantage NEWS_SENTIMENT adapter.
-
-Alpha Vantage documents time_from/time_to historical filtering and ticker
-filtering. The adapter preserves publication timestamps and provider metadata.
-API credentials are read only from ALPHAVANTAGE_API_KEY.
-"""
+"""Alpha Vantage NEWS_SENTIMENT adapter with explicit issuer symbol mapping."""
 from __future__ import annotations
+import json
 import os
 from datetime import datetime
+from pathlib import Path
 import requests
 import pandas as pd
 from news_provider import NewsQuery, NewsProvider, validate_articles
 
 BASE_URL = "https://www.alphavantage.co/query"
+MAP_PATH = Path(__file__).resolve().parents[1] / "config" / "news_symbol_map.json"
 
 class AlphaVantageNewsProvider(NewsProvider):
     name = "alphavantage"
@@ -20,6 +18,7 @@ class AlphaVantageNewsProvider(NewsProvider):
         if not self.api_key:
             raise RuntimeError("ALPHAVANTAGE_API_KEY is required")
         self.timeout = timeout
+        self.symbol_map = json.loads(MAP_PATH.read_text())
 
     @staticmethod
     def _utc_timestamp(value: datetime) -> pd.Timestamp:
@@ -28,12 +27,20 @@ class AlphaVantageNewsProvider(NewsProvider):
             return ts.tz_localize("UTC")
         return ts.tz_convert("UTC")
 
+    def provider_symbol(self, symbol: str) -> str:
+        try:
+            return self.symbol_map[symbol]["provider_symbol"]
+        except KeyError as exc:
+            raise ValueError(f"No Alpha Vantage news mapping configured for {symbol}") from exc
+
     def fetch(self, query: NewsQuery) -> pd.DataFrame:
+        original_symbol = query.symbol
+        provider_symbol = self.provider_symbol(original_symbol)
         start = self._utc_timestamp(query.start)
         end = self._utc_timestamp(query.end)
         params = {
             "function": "NEWS_SENTIMENT",
-            "tickers": query.symbol,
+            "tickers": provider_symbol,
             "time_from": start.strftime("%Y%m%dT%H%M"),
             "time_to": end.strftime("%Y%m%dT%H%M"),
             "sort": "EARLIEST",
@@ -44,12 +51,13 @@ class AlphaVantageNewsProvider(NewsProvider):
         r.raise_for_status()
         payload = r.json()
         if "feed" not in payload:
-            raise RuntimeError(f"Alpha Vantage response has no feed: {payload}")
+            safe_payload = {k: v for k, v in payload.items() if k.lower() not in {"apikey", "key"}}
+            raise RuntimeError(f"Alpha Vantage response has no feed for {original_symbol} ({provider_symbol}): {safe_payload}")
         rows = []
         for item in payload["feed"]:
             rows.append({
                 "published_at": item.get("time_published"),
-                "symbol": query.symbol,
+                "symbol": original_symbol,
                 "headline": item.get("title", ""),
                 "source": item.get("source", ""),
                 "url": item.get("url", ""),
