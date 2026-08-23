@@ -1,4 +1,4 @@
-"""Historical GDELT GKG 2.1 daily news features."""
+"""Historical GDELT GKG daily news features."""
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -18,19 +18,20 @@ GKG_COLUMNS = [
     "RelatedImages", "SocialImageEmbeds", "SocialVideoEmbeds", "Quotations",
     "AllNames", "Amounts", "TranslationInfo", "Extras",
 ]
-
+COMPACT_COLUMNS = [
+    "DATE", "DocumentIdentifier", "SourceCommonName", "V2Counts", "V2Themes",
+    "V2Locations", "V2Persons", "V2Organizations", "V2Tone", "AllNames", "Extras",
+]
 NORMALIZED_COLUMNS = [
     "published_at", "symbol", "headline", "source", "url", "summary",
     "category", "sentiment", "intensity", "relevance", "novelty",
 ]
-
 SYMBOL_ORGANIZATIONS = {
     "STLAM.MI": ("stellantis", "stellantis nv", "stellantis n.v.", "fiat chrysler", "fiat chrysler automobiles"),
     "SPCX": ("spacex", "space exploration technologies", "space exploration technologies corp"),
     "NVDA": ("nvidia", "nvidia corporation", "nvidia corp"),
     "TSLA": ("tesla", "tesla motors", "tesla inc", "tesla, inc"),
 }
-
 GKG_BASE = "https://data.gdeltproject.org/gkg/{day}.gkg.csv.zip"
 _TONE_RE = re.compile(r"^-?\d+(?:\.\d+)?(?:,-?\d+(?:\.\d+)?){2,}")
 
@@ -50,8 +51,6 @@ def _tone(value: object) -> float | None:
 
 def _org_names(value: object) -> list[str]:
     text = str(value or "")
-    if not text:
-        return []
     return [part.split(",", 1)[0].strip() for part in text.split(";") if part.split(",", 1)[0].strip()]
 
 
@@ -92,8 +91,6 @@ def _row_to_article(row: pd.Series, aliases: tuple[str, ...], symbol: str) -> di
 
 
 class GkgHistoricalProvider:
-    """Download one daily official GDELT GKG 2.1 file."""
-
     def __init__(self, timeout: int = 90):
         self.timeout = timeout
         self.session = requests.Session()
@@ -118,23 +115,38 @@ class GkgHistoricalProvider:
                 if not first_line:
                     raise RuntimeError(f"Empty GKG data file for {day_s}")
                 width = len(next(csv.reader([first_line], delimiter="\t")))
-                if width != len(GKG_COLUMNS):
-                    raise RuntimeError(
-                        f"Unsupported GDELT GKG row width for {day_s}: expected {len(GKG_COLUMNS)}, found {width}"
-                    )
                 fh.seek(0)
-                df = pd.read_csv(
-                    fh,
-                    sep="\t",
-                    header=None,
-                    names=GKG_COLUMNS,
-                    usecols=[1, 3, 4, 8, 13, 14, 15, 23],
-                    dtype=str,
-                    keep_default_na=False,
-                    na_filter=False,
-                )
+                if width == len(GKG_COLUMNS):
+                    df = pd.read_csv(
+                        fh, sep="\t", header=None, names=GKG_COLUMNS,
+                        usecols=[1, 3, 4, 8, 13, 14, 15, 23], dtype=str,
+                        keep_default_na=False, na_filter=False,
+                    )
+                elif width == len(COMPACT_COLUMNS):
+                    df = pd.read_csv(
+                        fh, sep="\t", header=None, names=COMPACT_COLUMNS,
+                        dtype=str, keep_default_na=False, na_filter=False,
+                    )
+                else:
+                    raise RuntimeError(
+                        f"Unsupported GDELT GKG row width for {day_s}: found {width}; expected {len(GKG_COLUMNS)} or {len(COMPACT_COLUMNS)}"
+                    )
         if df.empty:
             raise RuntimeError(f"Empty GKG data file for {day_s}")
+        if list(df.columns) == GKG_COLUMNS[:]:
+            pass
+        else:
+            df = df.rename(columns={
+                "V2Organizations": "V2Organizations",
+                "V2Tone": "V2Tone",
+                "V2Themes": "V2Themes",
+                "SourceCommonName": "SourceCommonName",
+                "DocumentIdentifier": "DocumentIdentifier",
+                "DATE": "DATE",
+            })
+            for col in ("Organizations", "AllNames"):
+                if col not in df.columns:
+                    df[col] = ""
         self._day_cache[day_s] = df
         return df
 
