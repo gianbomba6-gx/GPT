@@ -4,6 +4,9 @@ on:
   push:
     paths:
       - 'market_rebound_model/src/gdelt_news.py'
+      - 'market_rebound_model/src/news_provider.py'
+      - 'market_rebound_model/tests/test_gdelt_news.py'
+      - 'market_rebound_model/requirements.txt'
       - '.github/workflows/gdelt-smoke-test.yml'
   workflow_dispatch:
 
@@ -19,7 +22,9 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - name: Smoke test GDELT DOC
+      - name: Deterministic GDELT provider tests
+        run: python -m pytest -q tests/test_gdelt_news.py
+      - name: Live GDELT DOC smoke test
         run: |
           python - <<'PY'
           from datetime import datetime, timezone
