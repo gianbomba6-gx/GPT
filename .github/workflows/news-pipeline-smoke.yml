@@ -34,13 +34,16 @@ jobs:
           from datetime import date
           from src.gkg_historical_news import GkgHistoricalProvider
 
+          # GDELT publishes GKG files with a delay. Use the latest confirmed
+          # archive present in the public index rather than assuming today-1.
+          smoke_day = date(2026, 8, 19)
           provider = GkgHistoricalProvider(timeout=90)
           total = 0
           for symbol in ["STLAM.MI", "SPCX", "NVDA", "TSLA"]:
-              df = provider.fetch_day(symbol, date(2026, 8, 20))
+              df = provider.fetch_day(symbol, smoke_day)
               print(f"GKG {symbol}: {len(df)} articles")
               total += len(df)
           if total <= 0:
               raise SystemExit("GDELT GKG returned zero articles")
-          print(f"GKG SMOKE PASS: total={total}")
+          print(f"GKG SMOKE PASS: total={total} date={smoke_day.isoformat()}")
           PY
