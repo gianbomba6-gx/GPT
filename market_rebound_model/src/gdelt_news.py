@@ -34,7 +34,7 @@ class GdeltNewsProvider(NewsProvider):
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": "market-rebound-model/1.0 (GDELT DOC client)",
-            "Accept": "application/json",
+            "Accept": "application/json, text/plain;q=0.9, */*;q=0.8",
         })
 
     def _request(self, symbol: str, start: datetime, end: datetime) -> list[dict]:
@@ -55,14 +55,15 @@ class GdeltNewsProvider(NewsProvider):
             try:
                 response = self.session.get(API, params=params, timeout=self.timeout)
                 response.raise_for_status()
-                content_type = response.headers.get("content-type", "").lower()
-                if "json" not in content_type:
+                try:
+                    payload = response.json()
+                except ValueError as exc:
+                    content_type = response.headers.get("content-type", "")
                     body = response.text.strip().replace("\n", " ")[:500]
                     raise RuntimeError(
-                        f"GDELT returned non-JSON response: status={response.status_code} "
+                        f"GDELT returned non-JSON content: status={response.status_code} "
                         f"content_type={content_type!r} body={body!r}"
-                    )
-                payload = response.json()
+                    ) from exc
                 if not isinstance(payload, dict):
                     raise RuntimeError(f"GDELT returned unexpected JSON type: {type(payload).__name__}")
                 return payload.get("articles", []) or []
