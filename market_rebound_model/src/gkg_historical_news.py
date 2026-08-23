@@ -24,8 +24,8 @@ NORMALIZED_COLUMNS = [
 ]
 
 SYMBOL_ORGANIZATIONS = {
-    "STLAM.MI": ("stellantis", "stla", "fiat chrysler", "fca"),
-    "SPCX": ("spacex",),
+    "STLAM.MI": ("stellantis", "stla", "fiat chrysler", "fiat chrysler automobiles"),
+    "SPCX": ("spacex", "space exploration technologies"),
     "NVDA": ("nvidia", "nvda"),
     "TSLA": ("tesla", "tesla motors", "tesla inc"),
 }
