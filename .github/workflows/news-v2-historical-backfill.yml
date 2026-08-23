@@ -19,7 +19,7 @@ on:
 
 concurrency:
   group: news-v2-historical-backfill
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   tests:
