@@ -10,7 +10,11 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 # post-listing histories (e.g. SPCX) can still be scored. Longer horizons can
 # be added later as optional features when enough history exists.
 BASE_FEATURES = ["ret", "gap", "range", "close_loc", "recovery_from_low", "vol_ratio", "ret_3", "dd_3", "vol_3", "ret_5", "dd_5", "vol_5", "ret_10", "dd_10", "vol_10", "ret_20", "dd_20", "vol_20"]
-NEWS_FEATURES = ["news_sentiment", "news_intensity", "news_relevance", "news_novelty", "news_count"]
+NEWS_FEATURES = [
+    "news_sentiment", "news_intensity", "news_relevance", "news_novelty", "news_count",
+    "negative_news_share", "material_event_share", "event_polarity", "event_intensity",
+    "unique_event_types", "news_available",
+]
 
 
 def _italian_num(s: pd.Series) -> pd.Series:
@@ -94,9 +98,6 @@ def predict_latest(df: pd.DataFrame, target: str = "target_3", train_before_late
     latest = x.dropna(subset=features).iloc[-1:]
     if latest.empty:
         raise ValueError("No row has complete features")
-    # If possible, avoid using any observations from the current year so that
-    # the live prediction has the same conservative temporal separation as
-    # the walk-forward backtest.
     if train_before_latest_year:
         cutoff_year = int(latest["Date"].dt.year.iloc[0])
         prior = train[train.Date.dt.year < cutoff_year]
