@@ -35,25 +35,23 @@ class FakeSession:
         return FakeResponse(self.content)
 
 
-def _row(org):
+def _canonical_row(org):
     row = [""] * len(GKG_COLUMNS)
-    # GKG 2.1 order: GKGRECORDID, then DATE.
     row[0] = "20260820153000-1"
     row[1] = "20260820153000"
-    row[2] = "1"
     row[3] = "Example News"
     row[4] = "https://example.com/article"
-    row[7] = "ECON"
-    row[8] = "ECON_STOCKMARKET"
+    row[8] = "ECON_STOCKMARKET;ECON_TECH"
     row[13] = org
     row[14] = f"{org},123"
     row[15] = "-2.5,1.0,3.0,4.0,5.0,6.0,100"
+    row[23] = f"{org},123"
     return row
 
 
 def test_gkg_filters_organization_and_parses_tone():
     provider = GkgHistoricalProvider()
-    provider.session = FakeSession(_zip_payload([_row("NVIDIA"), _row("Microsoft")]))
+    provider.session = FakeSession(_zip_payload([_canonical_row("NVIDIA"), _canonical_row("Microsoft")]))
     out = provider.fetch_day("NVDA", date(2026, 8, 20))
     assert len(out) == 1
     assert out.iloc[0]["symbol"] == "NVDA"
@@ -64,12 +62,13 @@ def test_gkg_filters_organization_and_parses_tone():
 
 
 def test_compact_gkg_layout_is_parsed_without_fixed_27_columns():
-    # This layout intentionally contains only the key fields needed by V2.
+    # Compact GKG layout: DATE, URL, source, V2Counts, V2Themes,
+    # V2Locations, V2Persons, V2Organizations, V2Tone, AllNames, Extras.
     row = [
-        "20260820153000-9",
         "20260820153000",
-        "Example News",
         "https://example.com/nvidia-news",
+        "Example News",
+        "",
         "ECON_STOCKMARKET;ECON_TECH",
         "",
         "",
@@ -90,7 +89,7 @@ def test_compact_gkg_layout_is_parsed_without_fixed_27_columns():
 
 def test_gkg_day_is_cached_across_symbols():
     provider = GkgHistoricalProvider()
-    provider.session = FakeSession(_zip_payload([_row("NVIDIA"), _row("Tesla")]))
+    provider.session = FakeSession(_zip_payload([_canonical_row("NVIDIA"), _canonical_row("Tesla")]))
     provider.fetch_day("NVDA", date(2026, 8, 20))
     provider.fetch_day("TSLA", date(2026, 8, 20))
     assert provider.session.calls == 1
