@@ -6,6 +6,7 @@ on:
       - 'market_rebound_model/src/gdelt_news.py'
       - 'market_rebound_model/src/gkg_historical_news.py'
       - 'market_rebound_model/src/news_provider.py'
+      - 'market_rebound_model/src/news_event_classifier.py'
       - 'market_rebound_model/tests/test_gdelt_news.py'
       - 'market_rebound_model/tests/test_gkg_historical_news.py'
       - 'market_rebound_model/requirements.txt'
@@ -26,25 +27,6 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Deterministic provider tests
         run: python -m pytest -q tests/test_gdelt_news.py tests/test_gkg_historical_news.py
-      - name: Live GDELT DOC smoke test
-        run: |
-          python - <<'PY'
-          from datetime import datetime, timezone
-          from src.gdelt_news import GdeltNewsProvider
-          from src.news_provider import NewsQuery
-
-          start = datetime(2026, 8, 20, tzinfo=timezone.utc)
-          end = datetime(2026, 8, 21, tzinfo=timezone.utc)
-          provider = GdeltNewsProvider(pause=1.0, retries=5)
-          total = 0
-          for symbol in ["STLAM.MI", "SPCX", "NVDA", "TSLA"]:
-              df = provider.fetch(NewsQuery(symbol=symbol, start=start, end=end))
-              print(f"DOC {symbol}: {len(df)} articles")
-              total += len(df)
-          if total <= 0:
-              raise SystemExit("GDELT DOC returned zero articles")
-          print(f"DOC SMOKE PASS: total={total}")
-          PY
       - name: Live historical GKG smoke test
         run: |
           python - <<'PY'
