@@ -1,7 +1,7 @@
 """Leakage-safe news features aligned to the next tradable session."""
 from __future__ import annotations
 import pandas as pd
-from news_event_classifier import add_event_features
+from .news_event_classifier import add_event_features
 
 CLOSE_UTC_MINUTE = {"STLAM.MI": 15 * 60 + 30, "STLA": 15 * 60 + 30, "SPCX": 20 * 60, "NVDA": 20 * 60, "TSLA": 20 * 60}
 
@@ -27,11 +27,7 @@ def build_news_features(raw: pd.DataFrame) -> pd.DataFrame:
 
 
 def merge_with_market(market: pd.DataFrame, news_daily: pd.DataFrame) -> pd.DataFrame:
-    """Map each news bucket to the first available market session, then exact-merge.
-
-    Unlike a backward asof merge, this never carries old news forward into a later
-    session with no new articles.
-    """
+    """Map each news bucket to the first available market session, then exact-merge."""
     m = market.copy()
     m["Date"] = pd.to_datetime(m["Date"], errors="coerce", utc=True).dt.normalize().dt.tz_localize(None)
     n = news_daily.copy()
