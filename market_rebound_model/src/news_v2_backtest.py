@@ -58,11 +58,33 @@ def load_news(path: str | Path) -> pd.DataFrame:
 
 
 def merge_news(market: pd.DataFrame, news: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """Merge news to the first market session on/after its availability date.
+
+    This preserves post-close news when it lands on weekends/holidays instead
+    of silently dropping it because there is no market row on that calendar day.
+    """
     x = market.copy()
+    x["Date"] = pd.to_datetime(x["Date"], errors="coerce").dt.normalize()
+    x = x.sort_values("Date")
+
     n = news[news.symbol == symbol].copy()
     cols = ["Date", "symbol"] + [c for c in NEWS_FEATURES if c in n.columns]
     n = n[cols].drop_duplicates(["Date", "symbol"])
-    x = x.merge(n.drop(columns=["symbol"]), on="Date", how="left")
+    n["Date"] = pd.to_datetime(n["Date"], errors="coerce").dt.normalize()
+    n = n.dropna(subset=["Date"]).sort_values("Date")
+
+    if not n.empty:
+        n = pd.merge_asof(n, x[["Date"]], on="Date", direction="forward").dropna(subset=["Date"])
+        n = n.rename(columns={"Date_x": "available_date", "Date_y": "Date"}) if "Date_x" in n.columns else n
+        # merge_asof keeps the right key under the same name; preserve the mapped session.
+        if "available_date" not in n.columns:
+            # Reconstruct the original availability date from the left side if needed.
+            n["available_date"] = pd.NaT
+        agg_cols = [c for c in NEWS_FEATURES if c in n.columns]
+        n = n[["Date"] + agg_cols]
+        n = n.groupby("Date", as_index=False).agg({c: "sum" if c == "news_count" else "mean" for c in agg_cols})
+        x = x.merge(n, on="Date", how="left")
+
     for c in NEWS_FEATURES:
         if c not in x.columns:
             x[c] = 0.0
@@ -76,9 +98,26 @@ def model_predict(train: pd.DataFrame, test: pd.DataFrame, features: list[str]) 
     te = test.dropna(subset=features)
     if len(tr) < 500 or te.empty or tr[TARGET].nunique() < 2:
         return pd.Series(dtype=float)
-    model = HistGradientBoostingClassifier(max_iter=250, max_leaf_nodes=15, learning_rate=.05, l2_regularization=2, random_state=42)
+    model = HistGradientBoostingClassifier(
+        max_iter=250, max_leaf_nodes=15, learning_rate=.05,
+        l2_regularization=2, random_state=42,
+    )
     model.fit(tr[features], tr[TARGET].astype(int))
     return pd.Series(model.predict_proba(te[features])[:, 1], index=te.index)
+
+
+def prior_oos_predictions(prior: pd.DataFrame, features: list[str]) -> pd.Series:
+    """Generate strictly out-of-sample probabilities for prior candidate years."""
+    outputs = []
+    for year in sorted(prior.Date.dt.year.unique()):
+        train = prior[prior.Date.dt.year < year]
+        test = prior[prior.Date.dt.year == year]
+        if len(train) < 500 or test.empty:
+            continue
+        p = model_predict(train, test, features)
+        if not p.empty:
+            outputs.append(p)
+    return pd.concat(outputs) if outputs else pd.Series(dtype=float)
 
 
 def pooled_walk_forward(data: pd.DataFrame) -> pd.DataFrame:
@@ -100,11 +139,12 @@ def pooled_walk_forward(data: pd.DataFrame) -> pd.DataFrame:
         test["prob_v2"] = p2.reindex(test.index)
         test["baseline_signal"] = True
 
-        # Quantile thresholds are estimated strictly from prior candidate days.
-        tr1 = model_predict(train, train, v1)
-        tr2 = model_predict(train, train, v2)
-        thr1 = tr1.quantile(.80) if len(tr1) else float("nan")
-        thr2 = tr2.quantile(.80) if len(tr2) else float("nan")
+        # Thresholds are based only on prior out-of-sample predictions.
+        prior_v1 = prior_oos_predictions(train, v1)
+        prior_v2 = prior_oos_predictions(train, v2)
+        thr1 = prior_v1.quantile(.80) if len(prior_v1) else float("nan")
+        thr2 = prior_v2.quantile(.80) if len(prior_v2) else float("nan")
+
         test["v1_70"] = test["prob_v1"] >= .70
         test["v2_70"] = test["prob_v2"] >= .70
         test["v1_top20"] = test["prob_v1"] >= thr1
