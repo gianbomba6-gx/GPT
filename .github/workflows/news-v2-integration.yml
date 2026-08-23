@@ -7,6 +7,7 @@ on:
       - 'market_rebound_model/src/news_v2_backtest.py'
       - 'market_rebound_model/src/news_event_classifier.py'
       - 'market_rebound_model/src/gkg_historical_news.py'
+      - 'market_rebound_model/src/rebound_model.py'
       - 'market_rebound_model/tests/test_news_v2_integration.py'
       - '.github/workflows/news-v2-integration.yml'
   workflow_dispatch:
@@ -64,6 +65,19 @@ jobs:
           print(daily.groupby('symbol').size().to_string())
       - name: V2 backtest integration smoke
         run: python src/news_v2_backtest.py results/news_candidate_daily.csv --out results/news_v2_smoke_report.csv
+      - name: Validate V2 report
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          d = pd.read_csv('results/news_v2_smoke_report.csv')
+          required = ['set','n','mean_next_ret','hit_3pct']
+          missing = [c for c in required if c not in d.columns]
+          if missing:
+              raise SystemExit(f'Missing V2 report columns: {missing}')
+          if d.empty:
+              raise SystemExit('V2 report is empty')
+          print(d.to_string(index=False))
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: news-v2-smoke-results
