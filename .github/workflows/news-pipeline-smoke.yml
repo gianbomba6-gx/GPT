@@ -31,19 +31,25 @@ jobs:
       - name: Live historical GKG smoke test
         run: |
           python - <<'PY'
-          from datetime import date
+          from datetime import date, timedelta
           from src.gkg_historical_news import GkgHistoricalProvider
 
-          # GDELT publishes GKG files with a delay. Use the latest confirmed
-          # archive present in the public index rather than assuming today-1.
-          smoke_day = date(2026, 8, 19)
+          # One day's coverage can legitimately contain no matching company.
+          # Use a confirmed recent week and require at least one match overall.
+          end_day = date(2026, 8, 19)
+          start_day = end_day - timedelta(days=6)
           provider = GkgHistoricalProvider(timeout=90)
-          total = 0
-          for symbol in ["STLAM.MI", "SPCX", "NVDA", "TSLA"]:
-              df = provider.fetch_day(symbol, smoke_day)
-              print(f"GKG {symbol}: {len(df)} articles")
-              total += len(df)
+          totals = {symbol: 0 for symbol in ["STLAM.MI", "SPCX", "NVDA", "TSLA"]}
+          for day_offset in range(7):
+              day = start_day + timedelta(days=day_offset)
+              for symbol in totals:
+                  df = provider.fetch_day(symbol, day)
+                  totals[symbol] += len(df)
+          print(f"GKG SMOKE RANGE: {start_day}..{end_day}")
+          for symbol, count in totals.items():
+              print(f"GKG {symbol}: {count} articles")
+          total = sum(totals.values())
           if total <= 0:
-              raise SystemExit("GDELT GKG returned zero articles")
-          print(f"GKG SMOKE PASS: total={total} date={smoke_day.isoformat()}")
+              raise SystemExit("GDELT GKG returned zero matching articles across confirmed 7-day window")
+          print(f"GKG SMOKE PASS: total={total}")
           PY
