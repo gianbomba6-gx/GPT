@@ -1,0 +1,69 @@
+name: Historical news backfill (GDELT GKG)
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: 'UTC start date (YYYY-MM-DD)'
+        required: true
+        default: '2026-08-20'
+      end_date:
+        description: 'UTC end date (YYYY-MM-DD)'
+        required: true
+        default: '2026-08-21'
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Validate date range
+        env:
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+        run: |
+          python - <<'PY'
+          import os
+          from datetime import date
+          start = date.fromisoformat(os.environ['START_DATE'])
+          end = date.fromisoformat(os.environ['END_DATE'])
+          if end < start:
+              raise SystemExit('end_date must be on or after start_date')
+          print(f'VALIDATED range={start}..{end}')
+          PY
+      - name: Historical GKG backfill
+        env:
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+        run: |
+          python src/gkg_backfill_runner.py \
+            --start "$START_DATE" \
+            --end "$END_DATE" \
+            --out results/news_gkg_raw.csv
+      - name: Validate output
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          p = 'results/news_gkg_raw.csv'
+          d = pd.read_csv(p)
+          required = ['published_at','symbol','headline','source','url','summary','sentiment']
+          missing = [c for c in required if c not in d.columns]
+          if missing:
+              raise SystemExit(f'Missing columns: {missing}')
+          if d.empty:
+              raise SystemExit('Historical GKG backfill produced no rows')
+          print(f'VALIDATED rows={len(d)} symbols={sorted(d.symbol.dropna().unique())}')
+          print(d.groupby('symbol').size().to_string())
+      - uses: actions/upload-artifact@v4
+        with:
+          name: historical-gkg-news
+          path: |
+            market_rebound_model/results/news_gkg_raw.csv
+            market_rebound_model/results/news_gkg_raw.csv.checkpoint.csv
