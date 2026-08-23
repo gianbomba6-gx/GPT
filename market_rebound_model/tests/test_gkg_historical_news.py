@@ -39,10 +39,12 @@ class FakeSession:
 
 def _row(org):
     row = [""] * len(GKG_COLUMNS)
-    row[0] = "20260820153000"
-    row[1] = "1"
-    row[2] = "Example News"
-    row[3] = "https://example.com/article"
+    # GKG 2.1 order: GKGRECORDID, then DATE.
+    row[0] = "20260820153000-1"
+    row[1] = "20260820153000"
+    row[2] = "1"
+    row[3] = "Example News"
+    row[4] = "https://example.com/article"
     row[7] = "ECON"
     row[8] = "ECON_STOCKMARKET"
     row[13] = org
