@@ -15,6 +15,17 @@ on:
         description: 'Down-day threshold'
         required: false
         default: '-0.02'
+  push:
+    paths:
+      - 'market_rebound_model/.github/workflows/news_v2_full_backfill.yml'
+      - 'market_rebound_model/src/gkg_candidate_backfill.py'
+      - 'market_rebound_model/src/news_v2_backtest.py'
+      - 'market_rebound_model/src/news_event_classifier.py'
+      - 'market_rebound_model/src/gkg_historical_news.py'
+      - 'market_rebound_model/tests/test_news_v2_integration.py'
+      - 'market_rebound_model/tests/test_gkg_historical_news.py'
+      - 'market_rebound_model/config/tickers.json'
+      - 'market_rebound_model/requirements.txt'
 
 jobs:
   backfill:
@@ -23,6 +34,10 @@ jobs:
     defaults:
       run:
         working-directory: market_rebound_model
+    env:
+      START_DATE: '2020-01-01'
+      END_DATE: '2026-08-19'
+      THRESHOLD: '-0.02'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,12 +53,26 @@ jobs:
       - name: Run deterministic V2 tests
         run: python -m pytest -q tests/test_gdelt_news.py tests/test_gkg_historical_news.py tests/test_news_event_classifier.py tests/test_news_v2_integration.py
 
+      - name: Resolve backfill range
+        id: range
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "start=${{ inputs.start_date }}" >> "$GITHUB_OUTPUT"
+            echo "end=${{ inputs.end_date }}" >> "$GITHUB_OUTPUT"
+            echo "threshold=${{ inputs.threshold }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "start=${START_DATE}" >> "$GITHUB_OUTPUT"
+            echo "end=${END_DATE}" >> "$GITHUB_OUTPUT"
+            echo "threshold=${THRESHOLD}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Backfill candidate-day GKG news
         run: |
           python src/gkg_candidate_backfill.py \
-            --start "${{ inputs.start_date }}" \
-            --end "${{ inputs.end_date }}" \
-            --threshold "${{ inputs.threshold }}" \
+            --start "${{ steps.range.outputs.start }}" \
+            --end "${{ steps.range.outputs.end }}" \
+            --threshold "${{ steps.range.outputs.threshold }}" \
             --out-raw results/news_v2_full_raw.csv \
             --out-daily results/news_v2_full_daily.csv
 
@@ -101,7 +130,7 @@ jobs:
               raise SystemExit(f'Missing backtest columns: {sorted(missing)}')
           if d.empty:
               raise SystemExit('Historical V2 backtest is empty')
-          if not d['set'].astype(str).str.contains('V2 \+ news').any():
+          if not d['set'].astype(str).str.contains('V2 \\+ news').any():
               raise SystemExit('No V2 + news rows in backtest report')
           print(d.to_string(index=False))
           PY
@@ -109,7 +138,7 @@ jobs:
       - name: Upload historical V2 artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: news-v2-historical-${{ inputs.start_date }}-${{ inputs.end_date }}
+          name: news-v2-historical-${{ steps.range.outputs.start }}-${{ steps.range.outputs.end }}
           path: |
             market_rebound_model/results/news_v2_full_raw.csv
             market_rebound_model/results/news_v2_full_daily.csv
