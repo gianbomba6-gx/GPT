@@ -2,8 +2,6 @@ from datetime import date
 from io import BytesIO
 import zipfile
 
-import pandas as pd
-
 from src.gkg_historical_news import GKG_COLUMNS, GkgHistoricalProvider
 
 
@@ -63,6 +61,31 @@ def test_gkg_filters_organization_and_parses_tone():
     assert out.iloc[0]["sentiment"] == -2.5
     assert out.iloc[0]["intensity"] == 2.5
     assert provider.session.calls == 1
+
+
+def test_compact_gkg_layout_is_parsed_without_fixed_27_columns():
+    # This layout intentionally contains only the key fields needed by V2.
+    row = [
+        "20260820153000-9",
+        "20260820153000",
+        "Example News",
+        "https://example.com/nvidia-news",
+        "ECON_STOCKMARKET;ECON_TECH",
+        "",
+        "",
+        "NVIDIA,123;Microsoft,456",
+        "-3.2,1.0,4.0,5.0,6.0,100",
+        "NVIDIA,123",
+        "",
+    ]
+    provider = GkgHistoricalProvider()
+    provider.session = FakeSession(_zip_payload([row]))
+    out = provider.fetch_day("NVDA", date(2026, 8, 20))
+    assert len(out) == 1
+    assert out.iloc[0]["symbol"] == "NVDA"
+    assert out.iloc[0]["url"] == "https://example.com/nvidia-news"
+    assert out.iloc[0]["source"] == "Example News"
+    assert out.iloc[0]["sentiment"] == -3.2
 
 
 def test_gkg_day_is_cached_across_symbols():
