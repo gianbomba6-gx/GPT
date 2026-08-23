@@ -8,7 +8,7 @@ CLOSE_UTC_MINUTE = {"STLAM.MI": 15 * 60 + 30, "STLA": 15 * 60 + 30, "SPCX": 20 *
 
 def build_news_features(raw: pd.DataFrame) -> pd.DataFrame:
     if raw.empty:
-        return pd.DataFrame(columns=["available_date", "symbol", "news_count"])
+        return pd.DataFrame(columns=["available_date", "Date", "symbol", "news_count"])
     x = add_event_features(raw.copy())
     ts = pd.to_datetime(x["published_at"], utc=True, errors="coerce")
     x = x.loc[ts.notna()].copy()
@@ -17,13 +17,15 @@ def build_news_features(raw: pd.DataFrame) -> pd.DataFrame:
     cutoff = x["symbol"].map(CLOSE_UTC_MINUTE).fillna(20 * 60)
     minute = x["_ts"].dt.hour * 60 + x["_ts"].dt.minute + x["_ts"].dt.second / 60
     x["available_date"] = x["_date"] + pd.to_timedelta((minute > cutoff).astype(int), unit="D")
-    return (x.groupby(["available_date", "symbol"], as_index=False)
+    out = (x.groupby(["available_date", "symbol"], as_index=False)
         .agg(news_count=("headline", "size"),
              negative_news_share=("is_negative_event", "mean"),
              material_event_share=("is_material_event", "mean"),
              event_polarity=("event_polarity", "mean"),
              event_intensity=("event_intensity", "mean"),
              unique_event_types=("event_type", "nunique")))
+    out["Date"] = out["available_date"]
+    return out
 
 
 def merge_with_market(market: pd.DataFrame, news_daily: pd.DataFrame) -> pd.DataFrame:
@@ -31,6 +33,8 @@ def merge_with_market(market: pd.DataFrame, news_daily: pd.DataFrame) -> pd.Data
     m = market.copy()
     m["Date"] = pd.to_datetime(m["Date"], errors="coerce", utc=True).dt.normalize().dt.tz_localize(None)
     n = news_daily.copy()
+    if "available_date" not in n.columns and "Date" in n.columns:
+        n["available_date"] = n["Date"]
     n["available_date"] = pd.to_datetime(n["available_date"], errors="coerce", utc=True).dt.normalize().dt.tz_localize(None)
     n = n.dropna(subset=["available_date", "symbol"])
     mapped = []
