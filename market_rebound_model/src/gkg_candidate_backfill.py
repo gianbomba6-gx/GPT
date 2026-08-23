@@ -1,8 +1,8 @@
 """Candidate-day GDELT GKG backfill for causal rebound-news research.
 
-Only downloads GKG archives for days where one of the tracked stocks fell by
-at least the configured threshold. News is filtered at the local market close
-to avoid post-close look-ahead.
+Downloads GKG only for days where a tracked stock falls at least the configured
+threshold. News published after the local close is retained and assigned to the
+next available market session instead of being discarded.
 """
 from __future__ import annotations
 
@@ -68,6 +68,7 @@ def close_utc(day: date, symbol: str) -> pd.Timestamp:
 
 
 def filter_at_close(df: pd.DataFrame, symbol: str, day: date) -> pd.DataFrame:
+    """Return only news known by the local market close; kept for diagnostics/tests."""
     if df.empty:
         return df
     cutoff = close_utc(day, symbol)
@@ -77,15 +78,25 @@ def filter_at_close(df: pd.DataFrame, symbol: str, day: date) -> pd.DataFrame:
 
 
 def aggregate_daily(raw: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "Date", "symbol", "news_sentiment", "news_intensity", "news_relevance",
+        "news_novelty", "news_count", "negative_news_share", "material_event_share",
+        "event_polarity", "event_intensity", "unique_event_types", "news_available",
+    ]
     if raw.empty:
-        return pd.DataFrame(columns=[
-            "Date", "symbol", "news_sentiment", "news_intensity", "news_relevance",
-            "news_novelty", "news_count", "negative_news_share",
-            "material_event_share", "event_polarity", "event_intensity",
-            "unique_event_types", "news_available",
-        ])
-    x = add_event_features(raw)
-    x["Date"] = pd.to_datetime(x["candidate_day"], errors="coerce").dt.normalize()
+        return pd.DataFrame(columns=columns)
+
+    x = add_event_features(raw.copy())
+    x["published_at"] = pd.to_datetime(x["published_at"], utc=True, errors="coerce")
+    x["candidate_day"] = pd.to_datetime(x["candidate_day"], errors="coerce").dt.normalize()
+    x = x.dropna(subset=["published_at", "candidate_day", "symbol"]).copy()
+
+    def assign_date(row: pd.Series) -> pd.Timestamp:
+        day = row["candidate_day"].date()
+        cutoff = close_utc(day, row["symbol"])
+        return row["candidate_day"] if row["published_at"] <= cutoff else row["candidate_day"] + pd.Timedelta(days=1)
+
+    x["Date"] = x.apply(assign_date, axis=1)
     daily = (x.groupby(["Date", "symbol"], as_index=False)
         .agg(news_sentiment=("sentiment", "mean"),
              news_intensity=("intensity", "mean"),
@@ -98,7 +109,7 @@ def aggregate_daily(raw: pd.DataFrame) -> pd.DataFrame:
              event_intensity=("event_intensity", "mean"),
              unique_event_types=("event_type", "nunique")))
     daily["news_available"] = 1.0
-    return daily
+    return daily[columns]
 
 
 def run(symbols: list[str], start: str, end: str, threshold: float, out_raw: str, out_daily: str) -> None:
@@ -114,13 +125,16 @@ def run(symbols: list[str], start: str, end: str, threshold: float, out_raw: str
         for symbol in symbols:
             if day not in candidates[symbol]:
                 continue
-            df = filter_at_close(provider.fetch_day(symbol, day), symbol, day)
+            df = provider.fetch_day(symbol, day)
             if not df.empty:
                 df["candidate_day"] = day.isoformat()
                 raw_chunks.append(df)
-                print(f"NEWS {symbol} {day}: {len(df)} articles <= market close")
+                cutoff = close_utc(day, symbol)
+                total = len(df)
+                post_close = int((pd.to_datetime(df["published_at"], utc=True, errors="coerce") > cutoff).sum())
+                print(f"NEWS {symbol} {day}: {total} articles; post-close={post_close}")
             else:
-                print(f"NEWS {symbol} {day}: 0 articles <= market close")
+                print(f"NEWS {symbol} {day}: 0 articles")
 
     raw = pd.concat(raw_chunks, ignore_index=True) if raw_chunks else pd.DataFrame()
     raw_path = Path(out_raw)
