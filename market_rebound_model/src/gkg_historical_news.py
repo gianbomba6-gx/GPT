@@ -19,11 +19,6 @@ GKG_COLUMNS = [
     "AllNames", "Amounts", "TranslationInfo", "Extras",
 ]
 
-COMPACT_COLUMNS = [
-    "DATE", "DocumentIdentifier", "SourceCommonName", "V2Counts", "V2Themes",
-    "V2Locations", "V2Persons", "V2Organizations", "V2Tone", "AllNames", "Extras",
-]
-
 NORMALIZED_COLUMNS = [
     "published_at", "symbol", "headline", "source", "url", "summary",
     "category", "sentiment", "intensity", "relevance", "novelty",
@@ -38,17 +33,16 @@ SYMBOL_ORGANIZATIONS = {
         "spacex", "space exploration technologies",
         "space exploration technologies corp",
     ),
-    "NVDA": (
-        "nvidia", "nvidia corporation", "nvidia corp", "nvda",
-    ),
-    "TSLA": (
-        "tesla", "tesla motors", "tesla inc", "tesla, inc", "tsla",
-    ),
+    "NVDA": ("nvidia", "nvidia corporation", "nvidia corp", "nvda"),
+    "TSLA": ("tesla", "tesla motors", "tesla inc", "tesla, inc", "tsla"),
 }
 
 GKG_BASE = "https://data.gdeltproject.org/gkg/{day}.gkg.csv.zip"
 _TIMESTAMP_RE = re.compile(r"^\d{14}$")
+_RECORD_RE = re.compile(r"^\d{14}-(?:T?\d+)$")
 _TONE_RE = re.compile(r"^-?\d+(?:\.\d+)?(?:,-?\d+(?:\.\d+)?){2,}")
+_URL_RE = re.compile(r"^https?://", re.I)
+_DOMAIN_RE = re.compile(r"^[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?::\d+)?$")
 
 
 def _tone(value: object) -> float | None:
@@ -65,74 +59,65 @@ def _compact_alnum(text: object) -> str:
 
 
 def _matches(text: object, terms: tuple[str, ...]) -> bool:
-    """Match issuer names robustly across punctuation, suffixes and spacing."""
     normalized = _compact_alnum(text)
     if not normalized:
         return False
     return any(_compact_alnum(term) and _compact_alnum(term) in normalized for term in terms)
 
 
-def _canonical_from_fields(fields: list[str]) -> dict[str, str] | None:
-    if len(fields) < 20:
-        return None
-    return {
-        "record_id": fields[0],
-        "date": fields[1],
-        "source": fields[3],
-        "url": fields[4],
-        "themes": fields[8],
-        "organizations": fields[13],
-        "v2organizations": fields[14],
-        "tone": fields[15],
-        "all_names": fields[23] if len(fields) > 23 else "",
-        "all_fields": "\t".join(fields),
-    }
-
-
-def _compact_from_fields(fields: list[str]) -> dict[str, str] | None:
-    if len(fields) != len(COMPACT_COLUMNS):
-        return None
-    row = dict(zip(COMPACT_COLUMNS, fields))
-    return {
-        "record_id": "",
-        "date": row["DATE"],
-        "source": row["SourceCommonName"],
-        "url": row["DocumentIdentifier"],
-        "themes": row["V2Themes"],
-        "organizations": row["V2Organizations"],
-        "v2organizations": row["V2Organizations"],
-        "tone": row["V2Tone"],
-        "all_names": row["AllNames"],
-        "all_fields": "\t".join(fields),
-    }
-
-
 def _extract_row(fields: list[str], terms: tuple[str, ...]) -> dict | None:
+    """Extract fields by content rather than assuming one fixed GKG layout."""
     values = [str(x or "").strip() for x in fields]
-    row = _canonical_from_fields(values) if len(values) >= 20 else _compact_from_fields(values)
-    if row is None or not _TIMESTAMP_RE.match(row["date"]):
+    if len(values) < 4:
         return None
 
-    # Primary match: the GDELT organization fields. Fallback: scan the
-    # complete record because some current public extracts have layout
-    # differences or sparsely populated organization fields.
-    primary_values = [row["organizations"], row["v2organizations"], row["all_names"]]
-    matched = any(_matches(value, terms) for value in primary_values)
-    if not matched:
-        matched = _matches(row["all_fields"], terms)
-    if not matched:
+    # DATE may be at different positions in public extracts. Prefer an exact
+    # 14-digit timestamp, falling back to the date embedded in GKGRECORDID.
+    date_value = next((v for v in values if _TIMESTAMP_RE.fullmatch(v)), None)
+    if date_value is None:
+        record = next((v for v in values if _RECORD_RE.fullmatch(v)), None)
+        if record:
+            date_value = record[:14]
+    if date_value is None:
         return None
 
+    # URL and source are inferred independently so compact/extracted layouts
+    # do not shift fields.
+    url = next((v for v in values if _URL_RE.match(v)), "")
+    source = next((v for v in values if _DOMAIN_RE.fullmatch(v)), "")
+    if not source and url:
+        try:
+            source = re.sub(r"^https?://", "", url, flags=re.I).split("/", 1)[0]
+        except Exception:
+            source = ""
+
+    # V2Tone has a distinctive comma-delimited numeric structure. Use the
+    # first candidate and keep its first component as document tone.
+    tone_value = next((v for v in values if _TONE_RE.fullmatch(v)), "")
+
+    # Prefer theme-like fields for summary, but retain a deterministic fallback.
+    theme_candidates = [
+        v for v in values
+        if ";" in v and any(token in v.upper() for token in (
+            "ECON_", "TAX_", "CRISISLEX", "WB_", "GENERAL_", "MEDIA_"
+        ))
+    ]
+    summary = max(theme_candidates, key=len) if theme_candidates else ""
+
+    # Match against every field. This is deliberately broad for ingestion;
+    # downstream model features handle relevance/novelty and backtesting.
+    if not any(_matches(v, terms) for v in values):
+        return None
+
+    record_id = next((v for v in values if _RECORD_RE.fullmatch(v)), "")
     return {
-        "published_at": pd.to_datetime(
-            row["date"], format="%Y%m%d%H%M%S", utc=True, errors="coerce"
-        ),
+        "published_at": pd.to_datetime(date_value, format="%Y%m%d%H%M%S", utc=True, errors="coerce"),
         "headline": "",
-        "source": row["source"],
-        "url": row["url"],
-        "summary": row["themes"] or "",
-        "sentiment": _tone(row["tone"]),
-        "_record_id": row["record_id"],
+        "source": source,
+        "url": url,
+        "summary": summary,
+        "sentiment": _tone(tone_value),
+        "_record_id": record_id,
     }
 
 
@@ -167,9 +152,8 @@ class GkgHistoricalProvider:
         if not rows:
             raise RuntimeError(f"Empty GKG data file for {day_s}")
         widths = pd.Series([len(r) for r in rows[:2000]]).value_counts().to_dict()
-        supported = {11, 27}
-        if not set(widths).intersection(supported):
-            raise RuntimeError(f"Unsupported GDELT GKG row widths for {day_s}: {widths}")
+        if max(widths) < 4:
+            raise RuntimeError(f"Invalid GDELT GKG row widths for {day_s}: {widths}")
         self._day_cache[day_s] = rows
         return rows
 
