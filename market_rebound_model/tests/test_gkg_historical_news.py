@@ -20,11 +20,25 @@ class FakeResponse:
     def raise_for_status(self): pass
 
 
+class MissingResponse:
+    status_code = 404
+    headers = {}
+    content = b""
+    def raise_for_status(self): pass
+
+
 class FakeSession:
     def __init__(self, content): self.content, self.calls = content, 0
     def get(self, *args, **kwargs):
         self.calls += 1
         return FakeResponse(self.content)
+
+
+class MissingSession:
+    def __init__(self): self.calls = 0
+    def get(self, *args, **kwargs):
+        self.calls += 1
+        return MissingResponse()
 
 
 def _canonical_row(org):
@@ -113,4 +127,13 @@ def test_gkg_multi_symbol_scan_reads_archive_once_and_matches_both():
     out = provider.fetch_day_multi(["NVDA", "TSLA"], date(2026, 8, 20))
     assert set(out["symbol"]) == {"NVDA", "TSLA"}
     assert len(out) == 2
+    assert provider.session.calls == 1
+
+
+def test_missing_gkg_archive_is_skipped_and_recorded():
+    provider = GkgHistoricalProvider()
+    provider.session = MissingSession()
+    out = provider.fetch_day_multi(["NVDA", "TSLA"], date(2025, 6, 17))
+    assert out.empty
+    assert provider.missing_days == ["20250617"]
     assert provider.session.calls == 1
