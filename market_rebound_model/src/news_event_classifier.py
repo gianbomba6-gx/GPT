@@ -1,7 +1,8 @@
 """Deterministic news-event features for rebound-model V2.
 
-This is intentionally rule-based in V2. It provides reproducible event labels
-without introducing an LLM or post-cutoff information into the backtest.
+V2 intentionally remains deterministic.  For GDELT GKG historical rows the
+headline may be unavailable, so classification falls back to the normalized
+summary/themes field.
 """
 from __future__ import annotations
 import re
@@ -35,7 +36,15 @@ def classify_headline(text: str) -> tuple[str, float, float]:
 
 def add_event_features(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    classified = out["headline"].fillna("").map(classify_headline)
+    if "headline" not in out.columns:
+        out["headline"] = ""
+    if "summary" not in out.columns:
+        out["summary"] = ""
+    text = out["headline"].fillna("").astype(str).str.strip()
+    fallback = out["summary"].fillna("").astype(str).str.strip()
+    text = text.where(text.ne(""), fallback)
+    classified = text.map(classify_headline)
+    out["classification_text"] = text
     out["event_type"] = classified.map(lambda x: x[0])
     out["event_polarity"] = classified.map(lambda x: x[1])
     out["event_intensity"] = classified.map(lambda x: x[2])
@@ -48,7 +57,7 @@ def build_daily_event_features(df: pd.DataFrame) -> pd.DataFrame:
     x = add_event_features(df)
     x["Date"] = pd.to_datetime(x["published_at"], utc=True).dt.normalize()
     return (x.groupby(["Date", "symbol"], as_index=False)
-        .agg(news_count=("headline", "size"),
+        .agg(news_count=("classification_text", "size"),
              negative_news_share=("is_negative_event", "mean"),
              material_event_share=("is_material_event", "mean"),
              event_polarity=("event_polarity", "mean"),
