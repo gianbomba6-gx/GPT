@@ -6,11 +6,11 @@ on:
       start_date:
         description: 'UTC start date (YYYY-MM-DD)'
         required: true
-        default: '2026-08-20'
+        default: '2026-08-19'
       end_date:
         description: 'UTC end date (YYYY-MM-DD)'
         required: true
-        default: '2026-08-21'
+        default: '2026-08-19'
 
 jobs:
   backfill:
@@ -24,19 +24,28 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - name: Validate date range
+      - name: Validate date range and GKG availability
         env:
           START_DATE: ${{ inputs.start_date }}
           END_DATE: ${{ inputs.end_date }}
         run: |
           python - <<'PY'
           import os
+          import re
           from datetime import date
+          import requests
           start = date.fromisoformat(os.environ['START_DATE'])
           end = date.fromisoformat(os.environ['END_DATE'])
           if end < start:
               raise SystemExit('end_date must be on or after start_date')
-          print(f'VALIDATED range={start}..{end}')
+          html = requests.get('https://data.gdeltproject.org/gkg/index.html', timeout=30).text
+          days = [date(int(m[0][:4]), int(m[0][4:6]), int(m[0][6:8])) for m in re.findall(r'href="(\d{8})\.gkg\.csv\.zip"', html)]
+          if not days:
+              raise SystemExit('Could not determine latest available GDELT GKG archive')
+          latest = max(days)
+          if end > latest:
+              raise SystemExit(f'GKG archive not yet available through {end}; latest published archive is {latest}.')
+          print(f'VALIDATED range={start}..{end} latest_gkg={latest}')
           PY
       - name: Historical GKG backfill
         env:
