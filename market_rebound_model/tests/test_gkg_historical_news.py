@@ -99,3 +99,18 @@ def test_gkg_day_is_cached_across_symbols():
     provider.fetch_day("NVDA", date(2026, 8, 20))
     provider.fetch_day("TSLA", date(2026, 8, 20))
     assert provider.session.calls == 1
+
+
+def test_gkg_multi_symbol_scan_reads_archive_once_and_matches_both():
+    provider = GkgHistoricalProvider()
+    provider.session = FakeSession(
+        _zip_payload([
+            _canonical_row("NVIDIA"),
+            _canonical_row("Tesla"),
+            _canonical_row("Microsoft"),
+        ])
+    )
+    out = provider.fetch_day_multi(["NVDA", "TSLA"], date(2026, 8, 20))
+    assert set(out["symbol"]) == {"NVDA", "TSLA"}
+    assert len(out) == 2
+    assert provider.session.calls == 1
