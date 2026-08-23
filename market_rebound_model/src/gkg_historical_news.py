@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from io import BytesIO
+import csv
 import re
 import zipfile
 
@@ -113,6 +114,15 @@ class GkgHistoricalProvider:
             if not members:
                 raise RuntimeError(f"Empty GKG archive for {day_s}")
             with zf.open(members[0]) as fh:
+                first_line = fh.readline().decode("utf-8", "replace").rstrip("\r\n")
+                if not first_line:
+                    raise RuntimeError(f"Empty GKG data file for {day_s}")
+                width = len(next(csv.reader([first_line], delimiter="\t")))
+                if width != len(GKG_COLUMNS):
+                    raise RuntimeError(
+                        f"Unsupported GDELT GKG row width for {day_s}: expected {len(GKG_COLUMNS)}, found {width}"
+                    )
+                fh.seek(0)
                 df = pd.read_csv(
                     fh,
                     sep="\t",
