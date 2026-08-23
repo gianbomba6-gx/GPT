@@ -6,11 +6,17 @@ on:
       start_date:
         description: 'UTC start date (YYYY-MM-DD)'
         required: false
-        default: '2020-01-01'
+        default: '2025-08-23'
       end_date:
         description: 'UTC end date (YYYY-MM-DD)'
         required: false
         default: ''
+      provider:
+        description: 'News provider'
+        required: false
+        type: choice
+        options: [auto, finnhub, alphavantage]
+        default: auto
 
 jobs:
   backfill:
@@ -30,20 +36,25 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Run deterministic news unit tests
+        run: python -m unittest discover -s tests -p 'test_news_pipeline.py' -v
+
       - name: Run historical news backfill
         env:
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
           ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
           START_DATE: ${{ inputs.start_date }}
           END_DATE: ${{ inputs.end_date }}
+          PROVIDER: ${{ inputs.provider }}
         run: |
-          args=(--start "$START_DATE")
+          args=(--start "$START_DATE" --provider "$PROVIDER")
           if [ -n "$END_DATE" ]; then
             args+=(--end "$END_DATE")
           fi
           python src/news_backfill_runner.py "${args[@]}"
 
       - name: Build daily news features
-        run: python src/news_backfill.py results/news_raw.csv --out results/news_daily.csv
+        run: python src/news_backfill.py --input results/news_raw.csv --output results/news_daily.csv
 
       - name: Validate generated datasets
         run: |
