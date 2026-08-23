@@ -1,0 +1,23 @@
+name: News V2 unit tests
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'market_rebound_model/src/news_*.py'
+      - 'market_rebound_model/tests/test_news_*.py'
+      - 'market_rebound_model/requirements.txt'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: python -m pytest tests/test_news_event_classifier.py tests/test_news_features_v2.py
