@@ -19,20 +19,19 @@ GKG_COLUMNS = [
     "AllNames", "Amounts", "TranslationInfo", "Extras",
 ]
 
+COMPACT_COLUMNS = [
+    "DATE", "DocumentIdentifier", "SourceCommonName", "V2Counts", "V2Themes",
+    "V2Locations", "V2Persons", "V2Organizations", "V2Tone", "AllNames", "Extras",
+]
+
 NORMALIZED_COLUMNS = [
     "published_at", "symbol", "headline", "source", "url", "summary",
     "category", "sentiment", "intensity", "relevance", "novelty",
 ]
 
 SYMBOL_ORGANIZATIONS = {
-    "STLAM.MI": (
-        "stellantis", "stellantis nv", "stellantis n.v.", "stla",
-        "fiat chrysler", "fiat chrysler automobiles",
-    ),
-    "SPCX": (
-        "spacex", "space exploration technologies",
-        "space exploration technologies corp",
-    ),
+    "STLAM.MI": ("stellantis", "stellantis nv", "stellantis n.v.", "stla", "fiat chrysler", "fiat chrysler automobiles"),
+    "SPCX": ("spacex", "space exploration technologies", "space exploration technologies corp"),
     "NVDA": ("nvidia", "nvidia corporation", "nvidia corp", "nvda"),
     "TSLA": ("tesla", "tesla motors", "tesla inc", "tesla, inc", "tsla"),
 }
@@ -42,7 +41,6 @@ _TIMESTAMP_RE = re.compile(r"^\d{14}$")
 _RECORD_RE = re.compile(r"^\d{14}-(?:T?\d+)$")
 _TONE_RE = re.compile(r"^-?\d+(?:\.\d+)?(?:,-?\d+(?:\.\d+)?){2,}")
 _URL_RE = re.compile(r"^https?://", re.I)
-_DOMAIN_RE = re.compile(r"^[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?::\d+)?$")
 
 
 def _tone(value: object) -> float | None:
@@ -66,50 +64,51 @@ def _matches(text: object, terms: tuple[str, ...]) -> bool:
 
 
 def _extract_row(fields: list[str], terms: tuple[str, ...]) -> dict | None:
-    """Extract fields by content rather than assuming one fixed GKG layout."""
+    """Extract fields using explicit canonical/compact layouts plus safe fallbacks."""
     values = [str(x or "").strip() for x in fields]
     if len(values) < 4:
         return None
 
-    # DATE may be at different positions in public extracts. Prefer an exact
-    # 14-digit timestamp, falling back to the date embedded in GKGRECORDID.
-    date_value = next((v for v in values if _TIMESTAMP_RE.fullmatch(v)), None)
-    if date_value is None:
-        record = next((v for v in values if _RECORD_RE.fullmatch(v)), None)
-        if record:
-            date_value = record[:14]
-    if date_value is None:
+    if len(values) == len(GKG_COLUMNS):
+        date_value = values[1]
+        source = values[3]
+        url = values[4]
+        tone_value = values[15]
+        summary = values[8]
+        record_id = values[0]
+        match_values = [values[13], values[14], values[23], "\t".join(values)]
+    elif len(values) == len(COMPACT_COLUMNS):
+        date_value = values[0]
+        url = values[1]
+        source = values[2]
+        tone_value = values[8]
+        summary = values[4]
+        record_id = ""
+        match_values = [values[7], values[9], "\t".join(values)]
+    else:
+        date_value = next((v for v in values if _TIMESTAMP_RE.fullmatch(v)), None)
+        if date_value is None:
+            record = next((v for v in values if _RECORD_RE.fullmatch(v)), None)
+            if record:
+                date_value = record[:14]
+        if date_value is None:
+            return None
+        url = next((v for v in values if _URL_RE.match(v)), "")
+        source = ""
+        tone_value = next((v for v in values if _TONE_RE.fullmatch(v)), "")
+        summary_candidates = [v for v in values if ";" in v and any(k in v.upper() for k in ("ECON_", "TAX_", "CRISISLEX", "WB_", "GENERAL_", "MEDIA_"))]
+        summary = max(summary_candidates, key=len) if summary_candidates else ""
+        record_id = next((v for v in values if _RECORD_RE.fullmatch(v)), "")
+        match_values = values
+
+    if not date_value or not _TIMESTAMP_RE.fullmatch(date_value):
+        return None
+    if not any(_matches(v, terms) for v in match_values):
         return None
 
-    # URL and source are inferred independently so compact/extracted layouts
-    # do not shift fields.
-    url = next((v for v in values if _URL_RE.match(v)), "")
-    source = next((v for v in values if _DOMAIN_RE.fullmatch(v)), "")
     if not source and url:
-        try:
-            source = re.sub(r"^https?://", "", url, flags=re.I).split("/", 1)[0]
-        except Exception:
-            source = ""
+        source = re.sub(r"^https?://", "", url, flags=re.I).split("/", 1)[0]
 
-    # V2Tone has a distinctive comma-delimited numeric structure. Use the
-    # first candidate and keep its first component as document tone.
-    tone_value = next((v for v in values if _TONE_RE.fullmatch(v)), "")
-
-    # Prefer theme-like fields for summary, but retain a deterministic fallback.
-    theme_candidates = [
-        v for v in values
-        if ";" in v and any(token in v.upper() for token in (
-            "ECON_", "TAX_", "CRISISLEX", "WB_", "GENERAL_", "MEDIA_"
-        ))
-    ]
-    summary = max(theme_candidates, key=len) if theme_candidates else ""
-
-    # Match against every field. This is deliberately broad for ingestion;
-    # downstream model features handle relevance/novelty and backtesting.
-    if not any(_matches(v, terms) for v in values):
-        return None
-
-    record_id = next((v for v in values if _RECORD_RE.fullmatch(v)), "")
     return {
         "published_at": pd.to_datetime(date_value, format="%Y%m%d%H%M%S", utc=True, errors="coerce"),
         "headline": "",
@@ -144,11 +143,7 @@ class GkgHistoricalProvider:
             if not members:
                 raise RuntimeError(f"Empty GKG archive for {day_s}")
             with zf.open(members[0]) as fh:
-                rows = [
-                    row for row in csv.reader(
-                        (line.decode("utf-8", "replace") for line in fh), delimiter="\t"
-                    )
-                ]
+                rows = [row for row in csv.reader((line.decode("utf-8", "replace") for line in fh), delimiter="\t")]
         if not rows:
             raise RuntimeError(f"Empty GKG data file for {day_s}")
         widths = pd.Series([len(r) for r in rows[:2000]]).value_counts().to_dict()
