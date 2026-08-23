@@ -10,11 +10,14 @@ except ImportError:
     from news_provider import NewsProvider, NewsQuery, validate_articles, NORMALIZED_COLUMNS
 
 SEARCH_TERMS = {
-    "STLAM.MI": '("Stellantis" OR "STLA")',
-    "STLA": '("Stellantis" OR "STLA")',
-    "SPCX": '("SpaceX" OR "SPCX")',
-    "NVDA": '("NVIDIA" OR "NVDA")',
-    "TSLA": '("Tesla" OR "TSLA")',
+    # GDELT rejects very short search phrases such as STLA/SPCX/NVDA/TSLA.
+    # Use full issuer names for DOC; the historical GKG path performs the
+    # precise organization-level filtering independently.
+    "STLAM.MI": '"Stellantis"',
+    "STLA": '"Stellantis"',
+    "SPCX": '"SpaceX"',
+    "NVDA": '"NVIDIA"',
+    "TSLA": '"Tesla"',
 }
 API = "https://api.gdeltproject.org/api/v2/doc/doc"
 
@@ -61,9 +64,7 @@ class GdeltNewsProvider(NewsProvider):
                         wait = float(retry_after)
                     except (TypeError, ValueError):
                         wait = min(2 ** attempt, 30)
-                    raise RuntimeError(
-                        f"GDELT transient HTTP {status}; retry_after={wait:g}s"
-                    )
+                    raise RuntimeError(f"GDELT transient HTTP {status}; retry_after={wait:g}s")
                 response.raise_for_status()
                 try:
                     payload = response.json()
@@ -81,8 +82,6 @@ class GdeltNewsProvider(NewsProvider):
                 last_error = exc
                 if attempt >= self.retries:
                     break
-                # Keep normal requests gentle and give transient/rate-limit responses
-                # progressively more time before the next attempt.
                 if isinstance(exc, RuntimeError) and "retry_after=" in str(exc):
                     wait = float(str(exc).split("retry_after=", 1)[1].split("s", 1)[0])
                 else:
