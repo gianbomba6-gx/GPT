@@ -14,6 +14,17 @@ import zipfile
 import pandas as pd
 import requests
 
+# Public compatibility schema for canonical GKG 2.1 fixtures/tools. The
+# production parser below does not require a fixed row width.
+GKG_COLUMNS = [
+    "GKGRECORDID", "DATE", "SourceCollectionIdentifier", "SourceCommonName",
+    "DocumentIdentifier", "Counts", "V2Counts", "Themes", "V2Themes",
+    "Locations", "V2Locations", "Persons", "V2Persons", "Organizations",
+    "V2Organizations", "V2Tone", "Dates", "GCAM", "SharingImage",
+    "RelatedImages", "SocialImageEmbeds", "SocialVideoEmbeds", "Quotations",
+    "AllNames", "Amounts", "TranslationInfo", "Extras",
+]
+
 NORMALIZED_COLUMNS = [
     "published_at", "symbol", "headline", "source", "url", "summary",
     "category", "sentiment", "intensity", "relevance", "novelty",
@@ -88,6 +99,7 @@ def _extract_row(fields: list[str], terms: tuple[str, ...]) -> dict | None:
         "summary": summary,
         "sentiment": _tone(tone_value),
         "_record_id": values[record_idx] if record_idx is not None else "",
+        "_org_value": org_value,
     }
 
 
@@ -114,7 +126,13 @@ class GkgHistoricalProvider:
             if not members:
                 raise RuntimeError(f"Empty GKG archive for {day_s}")
             with zf.open(members[0]) as fh:
-                rows = [row for row in csv.reader((line.decode("utf-8", "replace") for line in fh), delimiter="\t")]
+                rows = [
+                    row
+                    for row in csv.reader(
+                        (line.decode("utf-8", "replace") for line in fh),
+                        delimiter="\t",
+                    )
+                ]
         if not rows:
             raise RuntimeError(f"Empty GKG data file for {day_s}")
         widths = pd.Series([len(r) for r in rows[:2000]]).value_counts().to_dict()
