@@ -1,0 +1,42 @@
+name: GDELT smoke test
+
+on:
+  push:
+    paths:
+      - 'market_rebound_model/src/gdelt_news.py'
+      - '.github/workflows/gdelt-smoke-test.yml'
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Smoke test GDELT DOC
+        run: |
+          python - <<'PY'
+          from datetime import datetime, timezone
+          from src.gdelt_news import GdeltNewsProvider
+          from src.news_provider import NewsQuery
+
+          start = datetime(2026, 8, 20, tzinfo=timezone.utc)
+          end = datetime(2026, 8, 21, tzinfo=timezone.utc)
+          provider = GdeltNewsProvider(pause=1.0, retries=4)
+
+          total = 0
+          for symbol in ["STLAM.MI", "SPCX", "NVDA", "TSLA"]:
+              df = provider.fetch(NewsQuery(symbol=symbol, start=start, end=end))
+              print(f"SMOKE {symbol}: {len(df)} articles")
+              total += len(df)
+
+          if total <= 0:
+              raise SystemExit("GDELT smoke test returned zero articles")
+          print(f"GDELT SMOKE PASS: total={total}")
+          PY
