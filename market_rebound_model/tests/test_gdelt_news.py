@@ -1,6 +1,6 @@
 import pandas as pd
 
-from src.gdelt_news import GdeltNewsProvider, _parse_seen_date
+from src.gdelt_news import GdeltNewsProvider, SEARCH_TERMS, _parse_seen_date
 from src.news_provider import NewsQuery
 
 
@@ -34,6 +34,12 @@ class FakeSession:
 def test_gdelt_timestamp_parser_is_utc():
     ts = _parse_seen_date("20260820153000")
     assert str(ts) == "2026-08-20 15:30:00+00:00"
+
+
+def test_doc_search_terms_are_not_rejected_as_short_phrases():
+    assert set(SEARCH_TERMS) >= {"STLAM.MI", "SPCX", "NVDA", "TSLA"}
+    for symbol, query in SEARCH_TERMS.items():
+        assert len(query.replace('"', '').replace('(', '').replace(')', '').strip()) >= 5, symbol
 
 
 def test_gdelt_fetch_normalizes_and_fences(monkeypatch):
