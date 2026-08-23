@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       start_date:
-        description: 'UTC start date (YYYY-MM-DD; GDELT DOC rolling window)'
+        description: 'UTC start date (YYYY-MM-DD; GDELT DOC recent window)'
         required: true
         default: '2026-08-20'
       end_date:
@@ -31,16 +31,24 @@ jobs:
       - name: Validate date range
         env:
           START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
         run: |
           python - <<'PY'
+          import os
           from datetime import date, timedelta
-          start = date.fromisoformat("${START_DATE}")
+
+          start = date.fromisoformat(os.environ['START_DATE'])
+          end = date.fromisoformat(os.environ['END_DATE'])
           today = date.today()
+
+          if end < start:
+              raise SystemExit(f'Invalid range: end {end} is before start {start}')
           if start < today - timedelta(days=90):
               raise SystemExit(
-                  f"GDELT DOC only supports a rolling recent window; requested {start}. "
-                  "Historical 2020+ data requires the separate GAL/NGrams historical pipeline."
+                  f'GDELT DOC recent-window check failed for {start}. '
+                  'Historical 2020+ data requires the separate historical pipeline.'
               )
+          print(f'VALID DATE RANGE: {start} -> {end}')
           PY
       - name: Backfill GDELT DOC
         env:
@@ -65,7 +73,12 @@ jobs:
               raise SystemExit(f'Missing columns: {missing}')
           if d.empty:
               raise SystemExit('GDELT backfill produced no articles')
-          print(f'VALIDATED rows={len(d)} symbols={sorted(d.symbol.dropna().unique())}')
+          expected = {'STLAM.MI','SPCX','NVDA','TSLA'}
+          actual = set(d['symbol'].dropna().astype(str))
+          missing_symbols = sorted(expected - actual)
+          if missing_symbols:
+              raise SystemExit(f'Missing symbols in output: {missing_symbols}')
+          print(f'VALIDATED rows={len(d)} symbols={sorted(actual)}')
           print(d.groupby('symbol').size().to_string())
           PY
       - uses: actions/upload-artifact@v4
