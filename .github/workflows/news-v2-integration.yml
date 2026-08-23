@@ -1,0 +1,73 @@
+name: News V2 integration smoke
+
+on:
+  push:
+    paths:
+      - 'market_rebound_model/src/gkg_candidate_backfill.py'
+      - 'market_rebound_model/src/news_v2_backtest.py'
+      - 'market_rebound_model/src/news_event_classifier.py'
+      - 'market_rebound_model/src/gkg_historical_news.py'
+      - 'market_rebound_model/tests/test_news_v2_integration.py'
+      - '.github/workflows/news-v2-integration.yml'
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: 'UTC start date'
+        required: true
+        default: '2026-08-13'
+      end_date:
+        description: 'UTC end date'
+        required: true
+        default: '2026-08-19'
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Deterministic V2 tests
+        run: python -m pytest -q tests/test_gdelt_news.py tests/test_gkg_historical_news.py tests/test_news_event_classifier.py tests/test_news_v2_integration.py
+      - name: Candidate GKG backfill smoke
+        env:
+          START_DATE: ${{ inputs.start_date || '2026-08-13' }}
+          END_DATE: ${{ inputs.end_date || '2026-08-19' }}
+        run: |
+          python src/gkg_candidate_backfill.py \
+            --start "$START_DATE" \
+            --end "$END_DATE" \
+            --out-raw results/news_candidate_raw.csv \
+            --out-daily results/news_candidate_daily.csv
+      - name: Validate causal news dataset
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          raw = pd.read_csv('results/news_candidate_raw.csv')
+          daily = pd.read_csv('results/news_candidate_daily.csv')
+          required = ['published_at','symbol','candidate_day','headline','source','url','summary','sentiment']
+          missing = [c for c in required if c not in raw.columns]
+          if missing:
+              raise SystemExit(f'Missing raw columns: {missing}')
+          required_daily = ['Date','symbol','news_count','negative_news_share','event_polarity','news_available']
+          missing = [c for c in required_daily if c not in daily.columns]
+          if missing:
+              raise SystemExit(f'Missing daily columns: {missing}')
+          if raw.empty or daily.empty:
+              raise SystemExit('News V2 smoke produced no data')
+          print(f'RAW rows={len(raw)} DAILY rows={len(daily)}')
+          print(daily.groupby('symbol').size().to_string())
+      - name: V2 backtest integration smoke
+        run: python src/news_v2_backtest.py results/news_candidate_daily.csv --out results/news_v2_smoke_report.csv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: news-v2-smoke-results
+          path: |
+            market_rebound_model/results/news_candidate_raw.csv
+            market_rebound_model/results/news_candidate_daily.csv
+            market_rebound_model/results/news_v2_smoke_report.csv
