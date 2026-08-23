@@ -4,6 +4,10 @@ The news dataset is intentionally backfilled only for candidate (down) days.
 Therefore the walk-forward model must also train/evaluate only on those same
 candidate days; otherwise the ``news_available`` flag would encode the target
 selection rule and create a severe look-ahead/selection bias.
+
+CI note: this module is also a trigger path for the single canonical V2
+historical backfill workflow, so a source-only commit can be used to force a
+fresh end-to-end validation without changing model behavior.
 """
 from __future__ import annotations
 
