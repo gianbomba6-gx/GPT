@@ -92,8 +92,6 @@ def aggregate_daily(raw: pd.DataFrame) -> pd.DataFrame:
     x["candidate_day"] = pd.to_datetime(x["candidate_day"], errors="coerce").dt.normalize()
     x = x.dropna(subset=["published_at", "candidate_day", "symbol"]).copy()
 
-    # The prediction is made after the candidate day's close. All articles from
-    # that same calendar day are therefore valid information for the next session.
     x["Date"] = x["candidate_day"]
     daily = (x.groupby(["Date", "symbol"], as_index=False)
         .agg(news_sentiment=("sentiment", "mean"),
@@ -120,18 +118,20 @@ def run(symbols: list[str], start: str, end: str, threshold: float, out_raw: str
     provider = GkgHistoricalProvider(timeout=90)
     raw_chunks: list[pd.DataFrame] = []
     for day in union_days:
-        for symbol in symbols:
-            if day not in candidates[symbol]:
-                continue
-            df = provider.fetch_day(symbol, day)
-            if not df.empty:
-                df["candidate_day"] = day.isoformat()
-                raw_chunks.append(df)
-                cutoff = close_utc(day, symbol)
-                post_close = int((pd.to_datetime(df["published_at"], utc=True, errors="coerce") > cutoff).sum())
-                print(f"NEWS {symbol} {day}: {len(df)} articles; post-close={post_close}")
-            else:
-                print(f"NEWS {symbol} {day}: 0 articles")
+        day_symbols = [symbol for symbol in symbols if day in candidates[symbol]]
+        if not day_symbols:
+            continue
+        df = provider.fetch_day_multi(day_symbols, day)
+        if df.empty:
+            print(f"NEWS {day}: 0 articles for {','.join(day_symbols)}")
+            continue
+        df["candidate_day"] = day.isoformat()
+        raw_chunks.append(df)
+        for symbol in day_symbols:
+            symbol_df = df[df["symbol"] == symbol]
+            cutoff = close_utc(day, symbol)
+            post_close = int((pd.to_datetime(symbol_df["published_at"], utc=True, errors="coerce") > cutoff).sum())
+            print(f"NEWS {symbol} {day}: {len(symbol_df)} articles; post-close={post_close}")
 
     raw = pd.concat(raw_chunks, ignore_index=True) if raw_chunks else pd.DataFrame()
     raw_path = Path(out_raw)
@@ -139,9 +139,14 @@ def run(symbols: list[str], start: str, end: str, threshold: float, out_raw: str
     raw_path.parent.mkdir(parents=True, exist_ok=True)
     daily_path.parent.mkdir(parents=True, exist_ok=True)
     if raw.empty:
+        raw = pd.DataFrame(columns=[
+            "published_at", "symbol", "headline", "source", "url", "summary",
+            "category", "sentiment", "intensity", "relevance", "novelty", "candidate_day",
+        ])
         raw.to_csv(raw_path, index=False)
-        pd.DataFrame().to_csv(daily_path, index=False)
-        raise RuntimeError("Candidate GKG backfill produced no articles")
+        aggregate_daily(raw).to_csv(daily_path, index=False)
+        print(f"WARNING: no matching GKG articles for {start}..{end}")
+        return
 
     daily = aggregate_daily(raw)
     raw.to_csv(raw_path, index=False)
