@@ -1,0 +1,118 @@
+name: News V2 historical backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: 'First market date to scan (YYYY-MM-DD)'
+        required: false
+        default: '2020-01-01'
+      end_date:
+        description: 'Last confirmed GDELT date (YYYY-MM-DD)'
+        required: false
+        default: '2026-08-19'
+      threshold:
+        description: 'Down-day threshold'
+        required: false
+        default: '-0.02'
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run deterministic V2 tests
+        run: python -m pytest -q tests/test_gdelt_news.py tests/test_gkg_historical_news.py tests/test_news_event_classifier.py tests/test_news_v2_integration.py
+
+      - name: Backfill candidate-day GKG news
+        run: |
+          python src/gkg_candidate_backfill.py \
+            --start "${{ inputs.start_date }}" \
+            --end "${{ inputs.end_date }}" \
+            --threshold "${{ inputs.threshold }}" \
+            --out-raw results/news_v2_full_raw.csv \
+            --out-daily results/news_v2_full_daily.csv
+
+      - name: Validate historical dataset
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          from pathlib import Path
+
+          raw_path = Path('results/news_v2_full_raw.csv')
+          daily_path = Path('results/news_v2_full_daily.csv')
+          raw = pd.read_csv(raw_path)
+          daily = pd.read_csv(daily_path)
+
+          required_raw = {
+              'published_at','symbol','headline','source','url','summary',
+              'sentiment','intensity','relevance','novelty','candidate_day'
+          }
+          required_daily = {
+              'Date','symbol','news_sentiment','news_intensity','news_relevance',
+              'news_novelty','news_count','negative_news_share','material_event_share',
+              'event_polarity','event_intensity','unique_event_types','news_available'
+          }
+          if not required_raw.issubset(raw.columns):
+              raise SystemExit(f'Missing raw columns: {sorted(required_raw - set(raw.columns))}')
+          if not required_daily.issubset(daily.columns):
+              raise SystemExit(f'Missing daily columns: {sorted(required_daily - set(daily.columns))}')
+          if raw.empty or daily.empty:
+              raise SystemExit('Historical GKG dataset is empty')
+          expected = {'STLAM.MI','SPCX','NVDA','TSLA'}
+          actual = set(raw['symbol'].dropna().unique())
+          if not expected.issubset(actual):
+              raise SystemExit(f'Missing tracked symbols: {sorted(expected - actual)}')
+          if (raw['candidate_day'].isna() | raw['published_at'].isna()).any():
+              raise SystemExit('Invalid candidate_day/published_at values present')
+
+          print(f'RAW={len(raw)} DAILY={len(daily)}')
+          print('RAW_BY_SYMBOL')
+          print(raw.groupby('symbol').size().to_string())
+          print('DAILY_DATE_RANGE')
+          print(daily['Date'].min(), '->', daily['Date'].max())
+          PY
+
+      - name: Run historical V1 vs V2 walk-forward
+        run: python src/news_v2_backtest.py results/news_v2_full_daily.csv --out results/news_v2_full_backtest.csv
+
+      - name: Validate V2 backtest
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          d = pd.read_csv('results/news_v2_full_backtest.csv')
+          required = {'set','n','mean_next_ret','median_next_ret','hit_2pct','hit_3pct','hit_5pct','mean_next_high'}
+          missing = required - set(d.columns)
+          if missing:
+              raise SystemExit(f'Missing backtest columns: {sorted(missing)}')
+          if d.empty:
+              raise SystemExit('Historical V2 backtest is empty')
+          if not d['set'].astype(str).str.contains('V2 \+ news').any():
+              raise SystemExit('No V2 + news rows in backtest report')
+          print(d.to_string(index=False))
+          PY
+
+      - name: Upload historical V2 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: news-v2-historical-${{ inputs.start_date }}-${{ inputs.end_date }}
+          path: |
+            market_rebound_model/results/news_v2_full_raw.csv
+            market_rebound_model/results/news_v2_full_daily.csv
+            market_rebound_model/results/news_v2_full_backtest.csv
+            market_rebound_model/results/latest_news_v2_oos_predictions.csv
+          if-no-files-found: error
