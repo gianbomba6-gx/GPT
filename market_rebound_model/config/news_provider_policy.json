@@ -1,0 +1,22 @@
+{
+  "primary": "finnhub",
+  "fallback": "alphavantage",
+  "finnhub": {
+    "symbols": {
+      "STLAM.MI": "STLA",
+      "SPCX": "SPCX",
+      "NVDA": "NVDA",
+      "TSLA": "TSLA"
+    },
+    "historical_limit": "provider_documented_one_year"
+  },
+  "alphavantage": {
+    "enabled_for_fallback": true,
+    "max_requests_per_run": 20
+  },
+  "policy": {
+    "never_claim_complete_history_when_provider_window_is_limited": true,
+    "fail_fast_on_missing_credentials": true,
+    "preserve_provider_name": true
+  }
+}
