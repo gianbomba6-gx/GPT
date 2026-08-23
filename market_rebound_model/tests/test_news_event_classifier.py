@@ -13,6 +13,19 @@ def test_negative_earnings_event():
     assert out.loc[0, "is_negative_event"] == 1
 
 
+def test_gkg_summary_fallback_when_headline_is_empty():
+    df = pd.DataFrame([{
+        "published_at": "2026-08-20T12:00:00Z",
+        "symbol": "NVDA",
+        "headline": "",
+        "summary": "earnings guidance downgrade",
+    }])
+    out = add_event_features(df)
+    assert out.loc[0, "classification_text"] == "earnings guidance downgrade"
+    assert out.loc[0, "event_type"] in {"earnings", "guidance", "analyst"}
+    assert out.loc[0, "is_negative_event"] == 1
+
+
 def test_daily_aggregation_is_date_safe():
     df = pd.DataFrame([
         {"published_at": "2026-08-20T12:00:00Z", "symbol": "TSLA", "headline": "Strong growth"},
