@@ -1,0 +1,22 @@
+{
+  "STLAM.MI": {
+    "provider_symbol": "STLA",
+    "provider": "alphavantage",
+    "reason": "Stellantis N.V.; Alpha Vantage NEWS_SENTIMENT accepts the US listing ticker STLA, while Yahoo uses STLAM.MI for the Milan listing. News is issuer-level and therefore mapped to the same company."
+  },
+  "SPCX": {
+    "provider_symbol": "SPCX",
+    "provider": "alphavantage",
+    "reason": "NASDAQ ticker accepted by Alpha Vantage NEWS_SENTIMENT."
+  },
+  "NVDA": {
+    "provider_symbol": "NVDA",
+    "provider": "alphavantage",
+    "reason": "NASDAQ ticker accepted by Alpha Vantage NEWS_SENTIMENT."
+  },
+  "TSLA": {
+    "provider_symbol": "TSLA",
+    "provider": "alphavantage",
+    "reason": "NASDAQ ticker accepted by Alpha Vantage NEWS_SENTIMENT."
+  }
+}
