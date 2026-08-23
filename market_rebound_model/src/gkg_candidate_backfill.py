@@ -1,9 +1,8 @@
 """Candidate-day GDELT GKG backfill for causal rebound-news research.
 
 Only downloads GKG archives for days where one of the tracked stocks fell by
-at least the configured threshold. This keeps the historical news dataset
-small while preserving the days used by the rebound model's signal universe.
-News is filtered at the local market close to avoid post-close look-ahead.
+at least the configured threshold. News is filtered at the local market close
+to avoid post-close look-ahead.
 """
 from __future__ import annotations
 
@@ -18,10 +17,10 @@ import yfinance as yf
 
 try:
     from .gkg_historical_news import GkgHistoricalProvider
-    from .news_event_classifier import add_event_features, build_daily_event_features
+    from .news_event_classifier import add_event_features
 except ImportError:
     from gkg_historical_news import GkgHistoricalProvider
-    from news_event_classifier import add_event_features, build_daily_event_features
+    from news_event_classifier import add_event_features
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = json.loads((ROOT / "config" / "tickers.json").read_text())
@@ -36,7 +35,14 @@ MARKET_META = {
 
 
 def fetch_prices(symbol: str, start: str, end: str) -> pd.DataFrame:
-    raw = yf.download(symbol, start=start, end=(pd.Timestamp(end) + pd.Timedelta(days=1)).date().isoformat(), interval="1d", auto_adjust=False, progress=False)
+    raw = yf.download(
+        symbol,
+        start=start,
+        end=(pd.Timestamp(end) + pd.Timedelta(days=1)).date().isoformat(),
+        interval="1d",
+        auto_adjust=False,
+        progress=False,
+    )
     if raw.empty:
         raise RuntimeError(f"No Yahoo data for {symbol}")
     if isinstance(raw.columns, pd.MultiIndex):
@@ -51,8 +57,7 @@ def candidate_dates(symbols: list[str], start: str, end: str, threshold: float) 
     out: dict[str, list[date]] = {}
     for symbol in symbols:
         d = fetch_prices(symbol, start, end)
-        dates = [x.date() for _, x in d.iterrows() if float(x["ret"]) <= threshold]
-        out[symbol] = dates
+        out[symbol] = [x.Date.date() for _, x in d.iterrows() if float(x.ret) <= threshold]
     return out
 
 
@@ -71,12 +76,38 @@ def filter_at_close(df: pd.DataFrame, symbol: str, day: date) -> pd.DataFrame:
     return x[x["published_at"] <= cutoff].copy()
 
 
+def aggregate_daily(raw: pd.DataFrame) -> pd.DataFrame:
+    if raw.empty:
+        return pd.DataFrame(columns=[
+            "Date", "symbol", "news_sentiment", "news_intensity", "news_relevance",
+            "news_novelty", "news_count", "negative_news_share",
+            "material_event_share", "event_polarity", "event_intensity",
+            "unique_event_types", "news_available",
+        ])
+    x = add_event_features(raw)
+    x["Date"] = pd.to_datetime(x["candidate_day"], errors="coerce").dt.normalize()
+    daily = (x.groupby(["Date", "symbol"], as_index=False)
+        .agg(news_sentiment=("sentiment", "mean"),
+             news_intensity=("intensity", "mean"),
+             news_relevance=("relevance", "mean"),
+             news_novelty=("novelty", "mean"),
+             news_count=("classification_text", "size"),
+             negative_news_share=("is_negative_event", "mean"),
+             material_event_share=("is_material_event", "mean"),
+             event_polarity=("event_polarity", "mean"),
+             event_intensity=("event_intensity", "mean"),
+             unique_event_types=("event_type", "nunique")))
+    daily["news_available"] = 1.0
+    return daily
+
+
 def run(symbols: list[str], start: str, end: str, threshold: float, out_raw: str, out_daily: str) -> None:
     candidates = candidate_dates(symbols, start, end, threshold)
     union_days = sorted({d for dates in candidates.values() for d in dates})
     counts = {s: len(v) for s, v in candidates.items()}
     print(f"CANDIDATE DAYS: {counts}")
     print(f"UNION DAYS: {len(union_days)}")
+
     provider = GkgHistoricalProvider(timeout=90)
     raw_chunks: list[pd.DataFrame] = []
     for day in union_days:
@@ -101,18 +132,9 @@ def run(symbols: list[str], start: str, end: str, threshold: float, out_raw: str
         pd.DataFrame().to_csv(daily_path, index=False)
         raise RuntimeError("Candidate GKG backfill produced no articles")
 
-    enriched = add_event_features(raw)
-    event_daily = build_daily_event_features(enriched)
-    base = (raw.groupby([raw["published_at"].dt.tz_convert("UTC").dt.normalize().dt.tz_localize(None), "symbol"], as_index=False)
-            .agg(news_sentiment=("sentiment", "mean"),
-                 news_intensity=("intensity", "mean"),
-                 news_relevance=("relevance", "mean"),
-                 news_novelty=("novelty", "mean"),
-                 news_count=("headline", "size"))
-            .rename(columns={"published_at": "Date"}))
-    daily = base.merge(event_daily, on=["Date", "symbol"], how="outer")
-    daily.to_csv(daily_path, index=False)
+    daily = aggregate_daily(raw)
     raw.to_csv(raw_path, index=False)
+    daily.to_csv(daily_path, index=False)
     print(f"Saved raw articles={len(raw)} to {raw_path}")
     print(f"Saved daily news rows={len(daily)} to {daily_path}")
 
