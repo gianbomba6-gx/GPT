@@ -1,0 +1,44 @@
+name: GDELT smoke test
+
+on:
+  push:
+    paths:
+      - 'market_rebound_model/src/gdelt_*.py'
+      - 'market_rebound_model/.github/workflows/gdelt_smoke_test.yml'
+      - 'market_rebound_model/requirements.txt'
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: One-day GDELT smoke test
+        run: |
+          python src/gdelt_backfill_runner.py --start 2026-08-20 --end 2026-08-21 --window-days 1 --out results/gdelt_smoke.csv
+      - name: Validate smoke output
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          p='results/gdelt_smoke.csv'
+          d=pd.read_csv(p)
+          required={'published_at','symbol','headline','source','url'}
+          missing=required-set(d.columns)
+          if missing:
+              raise SystemExit(f'Missing columns: {sorted(missing)}')
+          if d.empty:
+              raise SystemExit('GDELT returned no articles for smoke-test window')
+          expected={'STLAM.MI','SPCX','NVDA','TSLA'}
+          actual=set(d['symbol'].dropna().unique())
+          missing_symbols=expected-actual
+          if missing_symbols:
+              raise SystemExit(f'Missing symbols in GDELT output: {sorted(missing_symbols)}')
+          print(f'PASS rows={len(d)} symbols={sorted(actual)}')
+          print(d.groupby('symbol').size().to_string())
+          PY
