@@ -1,11 +1,9 @@
 """Historical GDELT GKG news features.
 
-Supports both legacy GKG 1.0 daily files (11 columns) and GKG 2.x
-27-column files. The public daily ``gkg.csv.zip`` archive currently uses
-the legacy 11-column layout, but the provider tests also exercise a compact
-11-column layout. The two 11-column layouts are distinguished by the second
-field: GKG 1.0 stores a numeric article count there, while compact rows store
-the document URL.
+Supports legacy GKG 1.0 daily files (11 columns), compact 11-column
+fixtures, and GKG 2.x 27-column files. The provider caches each daily archive,
+retries transient HTTP failures, and uses vectorized organization matching so
+large historical GKG files do not require a full ``iterrows()`` scan.
 """
 from __future__ import annotations
 
@@ -13,6 +11,7 @@ from datetime import date, timedelta
 from io import BytesIO
 import csv
 import re
+import time
 import zipfile
 
 import pandas as pd
@@ -112,22 +111,54 @@ def _row_to_article(row: pd.Series, aliases: tuple[str, ...], symbol: str) -> di
 
 
 class GkgHistoricalProvider:
-    def __init__(self, timeout: int = 90):
+    def __init__(self, timeout: int = 90, retries: int = 5, pause: float = 1.5):
         self.timeout = timeout
+        self.retries = retries
+        self.pause = pause
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": "market-rebound-model/1.0 (GDELT GKG client)",
             "Accept": "application/zip, application/octet-stream;q=0.9, */*;q=0.8",
         })
         self._day_cache: dict[str, pd.DataFrame] = {}
+        self._last_request_at = 0.0
+
+    def _request_archive(self, day_s: str) -> bytes:
+        url = GKG_BASE.format(day=day_s)
+        for attempt in range(self.retries + 1):
+            elapsed = time.monotonic() - self._last_request_at
+            if elapsed < self.pause:
+                time.sleep(self.pause - elapsed)
+            self._last_request_at = time.monotonic()
+            response = self.session.get(url, timeout=self.timeout)
+            status = response.status_code
+            if status == 200:
+                return response.content
+            if status == 404:
+                raise FileNotFoundError(f"GDELT GKG archive not found for {day_s}: {url}")
+            if status == 429 or 500 <= status < 600:
+                if attempt >= self.retries:
+                    raise RuntimeError(
+                        f"GDELT GKG transient HTTP {status} for {day_s} after {self.retries + 1} attempts"
+                    )
+                retry_after = response.headers.get("Retry-After", "")
+                try:
+                    wait = max(float(retry_after), 0.0) if retry_after else 0.0
+                except ValueError:
+                    wait = 0.0
+                wait = max(wait, min(60.0, 2.0 ** attempt))
+                time.sleep(wait)
+                continue
+            raise RuntimeError(f"GDELT GKG HTTP {status} for {day_s}")
+        raise RuntimeError(f"GDELT GKG request failed for {day_s}")
 
     def _load_day(self, day: date) -> pd.DataFrame:
         day_s = day.strftime("%Y%m%d")
         if day_s in self._day_cache:
             return self._day_cache[day_s]
-        response = self.session.get(GKG_BASE.format(day=day_s), timeout=self.timeout)
-        response.raise_for_status()
-        with zipfile.ZipFile(BytesIO(response.content)) as zf:
+
+        content = self._request_archive(day_s)
+        with zipfile.ZipFile(BytesIO(content)) as zf:
             members = [m for m in zf.namelist() if not m.endswith("/")]
             if not members:
                 raise RuntimeError(f"Empty GKG archive for {day_s}")
@@ -174,13 +205,21 @@ class GkgHistoricalProvider:
                         f"Unsupported GDELT GKG row width for {day_s}: "
                         f"found {width}; expected {len(GKG_COLUMNS)} or {len(GKG1_COLUMNS)}"
                     )
+
         if df.empty:
             raise RuntimeError(f"Empty GKG data file for {day_s}")
         self._day_cache[day_s] = df
         return df
 
+    @staticmethod
+    def _normalize_series(series: pd.Series) -> pd.Series:
+        return (
+            series.fillna("").astype(str).str.lower()
+            .str.replace(r"[^a-z0-9]+", "", regex=True)
+        )
+
     def fetch_day_multi(self, symbols: list[str], day: date) -> pd.DataFrame:
-        """Read one GKG day once and match all requested symbols in one pass."""
+        """Read one GKG day once and match all requested symbols vectorially."""
         normalized_symbols = [s.upper() for s in symbols]
         aliases = {}
         for symbol in normalized_symbols:
@@ -190,12 +229,27 @@ class GkgHistoricalProvider:
             aliases[symbol] = mapping
 
         df = self._load_day(day)
+        if df.empty:
+            return pd.DataFrame(columns=NORMALIZED_COLUMNS)
+
+        normalized_fields = [self._normalize_series(df[column]) for column in ("V2Organizations", "Organizations", "AllNames")]
+        searchable = normalized_fields[0] + "|" + normalized_fields[1] + "|" + normalized_fields[2]
         rows = []
-        for _, row in df.iterrows():
-            for symbol, symbol_aliases in aliases.items():
-                item = _row_to_article(row, symbol_aliases, symbol)
+        for symbol, symbol_aliases in aliases.items():
+            alias_norms = sorted({_norm(alias) for alias in symbol_aliases if _norm(alias)}, key=len, reverse=True)
+            pattern = "|".join(re.escape(alias) for alias in alias_norms)
+            if not pattern:
+                continue
+            mask = searchable.str.contains(pattern, regex=True, na=False)
+            matched = df.loc[mask]
+            if matched.empty:
+                continue
+            for row in matched.itertuples(index=False):
+                row_dict = row._asdict()
+                item = _row_to_article(pd.Series(row_dict), symbol_aliases, symbol)
                 if item is not None:
                     rows.append(item)
+
         if not rows:
             return pd.DataFrame(columns=NORMALIZED_COLUMNS)
         return (
