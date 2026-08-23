@@ -18,6 +18,11 @@ GKG_COLUMNS = [
     "AllNames", "Amounts", "TranslationInfo", "Extras",
 ]
 
+NORMALIZED_COLUMNS = [
+    "published_at", "symbol", "headline", "source", "url", "summary",
+    "category", "sentiment", "intensity", "relevance", "novelty",
+]
+
 SYMBOL_ORGANIZATIONS = {
     "STLAM.MI": ("stellantis", "stla", "fiat chrysler", "fca"),
     "SPCX": ("spacex",),
@@ -41,10 +46,10 @@ def _matches(text: object, terms: tuple[str, ...]) -> bool:
     if not isinstance(text, str) or not text:
         return False
     haystack = text.lower()
-    for term in terms:
-        if re.search(r"(?<![a-z0-9])" + re.escape(term) + r"(?![a-z0-9])", haystack):
-            return True
-    return False
+    return any(
+        re.search(r"(?<![a-z0-9])" + re.escape(term) + r"(?![a-z0-9])", haystack)
+        for term in terms
+    )
 
 
 class GkgHistoricalProvider:
@@ -53,14 +58,16 @@ class GkgHistoricalProvider:
     def __init__(self, timeout: int = 60):
         self.timeout = timeout
         self.session = requests.Session()
-        self.session.headers.update({"User-Agent": "market-rebound-model/1.0 (GDELT GKG client)"})
+        self.session.headers.update({
+            "User-Agent": "market-rebound-model/1.0 (GDELT GKG client)",
+            "Accept": "application/zip, application/octet-stream;q=0.9, */*;q=0.8",
+        })
+        self._day_cache: dict[str, pd.DataFrame] = {}
 
-    def fetch_day(self, symbol: str, day: date) -> pd.DataFrame:
-        symbol = symbol.upper()
-        terms = SYMBOL_ORGANIZATIONS.get(symbol)
-        if not terms:
-            raise ValueError(f"No GKG organization mapping for {symbol}")
+    def _load_day(self, day: date) -> pd.DataFrame:
         day_s = day.strftime("%Y%m%d")
+        if day_s in self._day_cache:
+            return self._day_cache[day_s]
         response = self.session.get(GKG_BASE.format(day=day_s), timeout=self.timeout)
         response.raise_for_status()
         with zipfile.ZipFile(BytesIO(response.content)) as zf:
@@ -72,18 +79,30 @@ class GkgHistoricalProvider:
                     fh,
                     sep="\t",
                     names=GKG_COLUMNS,
-                    usecols=["DATE", "SourceCommonName", "DocumentIdentifier", "Themes", "V2Themes", "Organizations", "V2Organizations", "V2Tone"],
+                    usecols=[
+                        "DATE", "SourceCommonName", "DocumentIdentifier", "Themes",
+                        "V2Themes", "Organizations", "V2Organizations", "V2Tone",
+                    ],
                     dtype=str,
                     on_bad_lines="skip",
                     low_memory=False,
                 )
+        self._day_cache[day_s] = df
+        return df
+
+    def fetch_day(self, symbol: str, day: date) -> pd.DataFrame:
+        symbol = symbol.upper()
+        terms = SYMBOL_ORGANIZATIONS.get(symbol)
+        if not terms:
+            raise ValueError(f"No GKG organization mapping for {symbol}")
+        df = self._load_day(day)
         org_mask = (
             df["Organizations"].map(lambda x: _matches(x, terms))
             | df["V2Organizations"].map(lambda x: _matches(x, terms))
         )
         out = df.loc[org_mask].copy()
         if out.empty:
-            return pd.DataFrame(columns=["published_at", "symbol", "headline", "source", "url", "summary", "category", "sentiment", "intensity", "relevance", "novelty"])
+            return pd.DataFrame(columns=NORMALIZED_COLUMNS)
         out["published_at"] = pd.to_datetime(out["DATE"], format="%Y%m%d%H%M%S", utc=True, errors="coerce")
         out["symbol"] = symbol
         out["headline"] = ""
@@ -92,10 +111,14 @@ class GkgHistoricalProvider:
         out["summary"] = out["V2Themes"].fillna(out["Themes"]).fillna("")
         out["category"] = "gkg"
         out["sentiment"] = out["V2Tone"].map(_tone)
-        out["intensity"] = out["V2Tone"].map(lambda x: _tone(x) if x is not None else None)
+        out["intensity"] = out["sentiment"].abs()
         out["relevance"] = 1.0
         out["novelty"] = pd.NA
-        return out[["published_at", "symbol", "headline", "source", "url", "summary", "category", "sentiment", "intensity", "relevance", "novelty"]].dropna(subset=["published_at"]).drop_duplicates(subset=["published_at", "url"])
+        return (
+            out[NORMALIZED_COLUMNS]
+            .dropna(subset=["published_at"])
+            .drop_duplicates(subset=["published_at", "url"])
+        )
 
     def fetch(self, symbol: str, start: date, end: date) -> pd.DataFrame:
         if end < start:
@@ -107,5 +130,5 @@ class GkgHistoricalProvider:
             frames.append(self.fetch_day(symbol, cursor))
             cursor += timedelta(days=1)
         if not frames:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=NORMALIZED_COLUMNS)
         return pd.concat(frames, ignore_index=True)
