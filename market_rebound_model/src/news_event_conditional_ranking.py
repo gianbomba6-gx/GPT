@@ -31,8 +31,10 @@ def build_ranking(diag: pd.DataFrame, min_n: int = MIN_N) -> pd.DataFrame:
     if candidates.empty:
         raise ValueError("No event-conditional rows available")
     candidates = candidates.merge(baseline, left_on="symbol", right_index=True, how="left")
-    for metric in ("mean", "hit_2pct", "hit_3pct", "hit_5pct"):
-        candidates[f"delta_{metric}"] = candidates[f"{metric if metric == 'mean' else metric}"] - candidates[f"baseline_{metric if metric == 'mean' else metric}"]
+    candidates["delta_mean"] = candidates["mean_next_ret"] - candidates["baseline_mean_next_ret"]
+    candidates["delta_hit_2pct"] = candidates["hit_2pct"] - candidates["baseline_hit_2pct"]
+    candidates["delta_hit_3pct"] = candidates["hit_3pct"] - candidates["baseline_hit_3pct"]
+    candidates["delta_hit_5pct"] = candidates["hit_5pct"] - candidates["baseline_hit_5pct"]
 
     rows = []
     for _, r in candidates.iterrows():
