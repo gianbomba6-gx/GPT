@@ -114,8 +114,13 @@ jobs:
           required = {'set','n','mean_next_ret','median_next_ret','hit_2pct','hit_3pct','hit_5pct','mean_next_high'}
           if not required.issubset(backtest.columns):
               raise SystemExit('Backtest report schema invalid')
-          v2 = backtest[backtest['set'].astype(str).str.contains(r'V2 \\+ news', regex=True)]
-          v3 = backtest[backtest['set'].astype(str).str.contains(r'V3 event-aware', regex=True)]
+          labels = backtest['set'].astype(str)
+          v2 = backtest[labels.str.contains(r'V2 \+ news', regex=True)]
+          v3 = backtest[labels.str.contains(r'V3 event-aware', regex=True)]
+          print('BACKTEST LABELS:')
+          print(labels.to_string(index=False))
+          print(f'V2 ROWS={len(v2)} V2_N={int(v2["n"].fillna(0).sum()) if not v2.empty else 0}')
+          print(f'V3 ROWS={len(v3)} V3_N={int(v3["n"].fillna(0).sum()) if not v3.empty else 0}')
           if v2.empty or v3.empty or (v3['n'].fillna(0) <= 0).all():
               raise SystemExit('Missing valid V2/V3 comparison rows')
           if diag.empty or diag[diag['condition'] == 'dominant'].empty:
