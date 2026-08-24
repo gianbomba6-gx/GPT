@@ -17,16 +17,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
-
       - name: Install dependencies
         run: pip install -r requirements.txt pytest
-
       - name: Run deterministic tests
         run: |
           python -m pytest -q \
@@ -60,16 +57,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
       - name: Backfill candidate-day GKG news
         run: |
           python src/gkg_candidate_backfill.py \
@@ -78,31 +72,32 @@ jobs:
             --threshold "${THRESHOLD}" \
             --out-raw "results/news_v2_${{ matrix.year }}_raw.csv" \
             --out-daily "results/news_v2_${{ matrix.year }}_daily.csv"
-
       - name: Validate yearly dataset
         run: |
           python - <<'PY'
           import pandas as pd
           from pathlib import Path
-
           year = '${{ matrix.year }}'
-          raw_path = Path(f'results/news_v2_{year}_raw.csv')
-          daily_path = Path(f'results/news_v2_{year}_daily.csv')
-          raw = pd.read_csv(raw_path)
-          daily = pd.read_csv(daily_path)
-
+          raw = pd.read_csv(Path(f'results/news_v2_{year}_raw.csv'))
+          daily = pd.read_csv(Path(f'results/news_v2_{year}_daily.csv'))
           required_raw = {
               'published_at','symbol','headline','source','url','summary',
               'category','sentiment','intensity','relevance','novelty','candidate_day'
           }
+          event_shares = {
+              'event_earnings_share','event_guidance_share','event_analyst_share',
+              'event_regulatory_share','event_ma_share','event_product_share',
+              'event_macro_share','event_other_share'
+          }
           required_daily = {
               'Date','symbol','news_sentiment','news_intensity','news_relevance',
               'news_novelty','news_count','negative_news_share','material_event_share',
-              'event_polarity','event_intensity','unique_event_types','news_available'
+              'event_polarity','event_intensity','unique_event_types','news_available',
+              *event_shares
           }
-          if set(raw.columns) != set(required_raw):
+          if set(raw.columns) != required_raw:
               raise SystemExit(f'{year}: unexpected raw columns: {sorted(set(raw.columns) ^ required_raw)}')
-          if set(daily.columns) != set(required_daily):
+          if set(daily.columns) != required_daily:
               raise SystemExit(f'{year}: unexpected daily columns: {sorted(set(daily.columns) ^ required_daily)}')
           if not raw.empty:
               expected = {'STLAM.MI','SPCX','NVDA','TSLA'}
@@ -112,7 +107,6 @@ jobs:
                   raise SystemExit(f'{year}: unknown symbols: {sorted(unknown)}')
           print(f'{year}: RAW={len(raw)} DAILY={len(daily)}')
           PY
-
       - name: Upload yearly artifact
         uses: actions/upload-artifact@v4
         with:
@@ -123,7 +117,7 @@ jobs:
           if-no-files-found: error
 
   aggregate_and_backtest:
-    name: Aggregate and V1 vs V2 backtest
+    name: Aggregate and V1 vs V3 event-aware backtest
     needs: yearly_backfill
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -133,40 +127,33 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
-
       - name: Install dependencies
         run: pip install -r requirements.txt pytest
-
       - name: Download yearly artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: news-v2-year-*
           path: market_rebound_model/results/yearly
           merge-multiple: false
-
       - name: Aggregate historical news dataset
         run: |
           python - <<'PY'
           from pathlib import Path
           import pandas as pd
-
           root = Path('results/yearly')
           raw_files = sorted(root.glob('*/news_v2_*_raw.csv'))
           daily_files = sorted(root.glob('*/news_v2_*_daily.csv'))
           if len(raw_files) != 7 or len(daily_files) != 7:
               raise SystemExit(f'Expected 7 yearly artifacts, found raw={len(raw_files)} daily={len(daily_files)}')
-
           raw = pd.concat([pd.read_csv(p) for p in raw_files], ignore_index=True)
           daily = pd.concat([pd.read_csv(p) for p in daily_files], ignore_index=True)
           raw = raw.drop_duplicates(subset=['published_at','url','symbol','candidate_day']).sort_values(['candidate_day','symbol','published_at'])
           daily = daily.drop_duplicates(subset=['Date','symbol']).sort_values(['Date','symbol'])
-
           expected = {'STLAM.MI','SPCX','NVDA','TSLA'}
           actual = set(raw['symbol'].dropna().unique())
           missing = expected - actual
@@ -174,48 +161,44 @@ jobs:
               raise SystemExit('Aggregated historical news dataset is empty')
           if missing:
               raise SystemExit(f'Missing tracked symbols: {sorted(missing)}')
-
           raw.to_csv('results/news_v2_full_raw.csv', index=False)
           daily.to_csv('results/news_v2_full_daily.csv', index=False)
           print(f'RAW={len(raw)} DAILY={len(daily)}')
           print(raw.groupby('symbol').size().to_string())
           print(f"DATE_RANGE={daily['Date'].min()} -> {daily['Date'].max()}")
           PY
-
-      - name: Run historical V1 vs V2 walk-forward
+      - name: Run historical V1 vs V3 event-aware walk-forward
         run: |
           python src/news_v2_backtest.py \
             results/news_v2_full_daily.csv \
-            --out results/news_v2_full_backtest.csv
-
-      - name: Validate backtest report
+            --out results/news_v3_event_aware_backtest.csv
+      - name: Validate event-aware backtest report
         run: |
           python - <<'PY'
           import pandas as pd
-          d = pd.read_csv('results/news_v2_full_backtest.csv')
-          required = {
-              'set','n','mean_next_ret','median_next_ret',
-              'hit_2pct','hit_3pct','hit_5pct','mean_next_high'
-          }
+          d = pd.read_csv('results/news_v3_event_aware_backtest.csv')
+          required = {'set','n','mean_next_ret','median_next_ret','hit_2pct','hit_3pct','hit_5pct','mean_next_high'}
           missing = required - set(d.columns)
           if missing:
               raise SystemExit(f'Missing report columns: {sorted(missing)}')
           if d.empty:
-              raise SystemExit('Historical V2 backtest is empty')
+              raise SystemExit('Historical event-aware backtest is empty')
           v2 = d[d['set'].astype(str).str.contains(r'V2 \+ news', regex=True)]
-          if v2.empty or (v2['n'].fillna(0) <= 0).all():
-              raise SystemExit('No valid V2 + news observations in historical report')
+          v3 = d[d['set'].astype(str).str.contains(r'V3 event-aware', regex=True)]
+          if v2.empty or v3.empty:
+              raise SystemExit('Missing V2 or V3 comparison rows')
+          if (v3['n'].fillna(0) <= 0).all():
+              raise SystemExit('No valid V3 event-aware observations in historical report')
           print(d.to_string(index=False))
-          print('NEWS V2 HISTORICAL BACKFILL PASS')
+          print('NEWS V3 EVENT-AWARE HISTORICAL BACKTEST PASS')
           PY
-
       - name: Upload final historical artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: news-v2-historical-final
+          name: news-v3-event-aware-historical-final
           path: |
             market_rebound_model/results/news_v2_full_raw.csv
             market_rebound_model/results/news_v2_full_daily.csv
-            market_rebound_model/results/news_v2_full_backtest.csv
-            market_rebound_model/results/latest_news_v2_oos_predictions.csv
+            market_rebound_model/results/news_v3_event_aware_backtest.csv
+            market_rebound_model/results/latest_news_v3_oos_predictions.csv
           if-no-files-found: error
