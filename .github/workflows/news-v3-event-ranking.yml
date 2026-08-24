@@ -1,0 +1,99 @@
+name: News V3 event ranking
+
+on:
+  push:
+    paths:
+      - 'market_rebound_model/src/news_event_conditional_ranking.py'
+      - 'market_rebound_model/tests/test_news_event_conditional_ranking.py'
+      - '.github/workflows/news-v3-event-ranking.yml'
+  workflow_dispatch:
+
+jobs:
+  ranking:
+    name: Robust event conditional ranking
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+
+      - name: Run ranking tests
+        run: python -m pytest -q tests/test_news_event_conditional_ranking.py
+
+      - name: Find latest successful conditional diagnostics artifact
+        id: artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id=$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/news-v3-event-conditional-diagnostics.yml/runs?status=success&per_page=20" \
+            --jq '.workflow_runs[0].id')
+          test -n "$run_id" && test "$run_id" != "null"
+          artifact_id=$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name=="news-v3-event-conditional-diagnostics") | .id' | head -n 1)
+          test -n "$artifact_id"
+          echo "artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
+
+      - name: Download diagnostics artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.artifact.outputs.artifact_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p results/imported
+          gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" \
+            > /tmp/diagnostics.zip
+          unzip -q /tmp/diagnostics.zip -d results/imported
+          diag=$(find results/imported -type f -name 'news_v3_event_conditional_diagnostics.csv' -print -quit)
+          test -n "$diag"
+          cp "$diag" results/news_v3_event_conditional_diagnostics.csv
+
+      - name: Build robust event ranking
+        run: |
+          python src/news_event_conditional_ranking.py \
+            results/news_v3_event_conditional_diagnostics.csv \
+            --out results/news_v3_event_conditional_ranking.csv \
+            --min-n 20
+
+      - name: Validate ranking
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          d = pd.read_csv('results/news_v3_event_conditional_ranking.csv')
+          required = {'symbol','event','condition','n','delta_mean','delta_hit_2pct','delta_hit_3pct','delta_hit_5pct','tier','score'}
+          if not required.issubset(d.columns):
+              raise SystemExit(f'Invalid ranking schema: {sorted(required - set(d.columns))}')
+          if d.empty:
+              raise SystemExit('Empty event ranking')
+          if (d[d['n'] < 20]['tier'] != 'INSUFFICIENT').any():
+              raise SystemExit('Small-sample event was not marked INSUFFICIENT')
+          print('EVENT RANKING PASS')
+          print(d.to_string(index=False))
+          PY
+
+      - name: Upload ranking artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: news-v3-event-conditional-ranking
+          path: market_rebound_model/results/news_v3_event_conditional_ranking.csv
+          if-no-files-found: error
