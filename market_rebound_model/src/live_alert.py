@@ -26,7 +26,7 @@ def fetch(symbol: str, period: str = "10y") -> pd.DataFrame:
     if isinstance(x.columns, pd.MultiIndex):
         x.columns = x.columns.get_level_values(0)
     x = x.rename(columns={"Close":"Ultimo", "Open":"Apertura", "High":"Massimo", "Low":"Minimo", "Volume":"Vol."})
-    x["Date"] = pd.to_datetime(x.index).tz_localize(None)
+    x["Date"] = pd.to_datetime(x.index).tz_localize(None).normalize().astype("datetime64[ns]")
     return x.reset_index(drop=True)[["Date", "Ultimo", "Apertura", "Massimo", "Minimo", "Vol."]]
 
 
@@ -39,7 +39,9 @@ def discord(message: str) -> None:
 
 
 def add_market_regime(frames: dict[str, pd.DataFrame], benchmark: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    b = benchmark[["Date", "Ultimo"]].copy().sort_values("Date")
+    b = benchmark[["Date", "Ultimo"]].copy()
+    b["Date"] = pd.to_datetime(b["Date"], errors="coerce").dt.normalize().astype("datetime64[ns]")
+    b = b.sort_values("Date")
     b["mkt_ret"] = b["Ultimo"].pct_change()
     b["mkt_ret_5"] = b["Ultimo"].pct_change(5)
     b["mkt_ret_20"] = b["Ultimo"].pct_change(20)
@@ -47,7 +49,10 @@ def add_market_regime(frames: dict[str, pd.DataFrame], benchmark: pd.DataFrame) 
     b = b.drop(columns=["Ultimo"])
     out = {}
     for symbol, d in frames.items():
-        z = pd.merge_asof(d.sort_values("Date"), b, on="Date", direction="backward")
+        x = d.copy()
+        x["Date"] = pd.to_datetime(x["Date"], errors="coerce").dt.normalize().astype("datetime64[ns]")
+        x = x.sort_values("Date")
+        z = pd.merge_asof(x, b, on="Date", direction="backward")
         z["rel_ret_1"] = z["ret"] - z["mkt_ret"]
         z["rel_ret_5"] = z["ret_5"] - z["mkt_ret_5"]
         z["rel_ret_20"] = z["ret_20"] - z["mkt_ret_20"]
