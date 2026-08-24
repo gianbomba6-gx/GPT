@@ -97,7 +97,7 @@ jobs:
               raise SystemExit('Empty walk-forward event-filter rows')
           if rows['event_veto'].dtype != bool:
               raise SystemExit('event_veto is not boolean')
-          if rows['event_filter_status'].isin(['FAVORABLE','AVOID']).any() is False:
+          if not rows['event_filter_status'].isin(['FAVORABLE','AVOID']).any():
               raise SystemExit('No learned event rules were applied OOS')
           print('WALK-FORWARD EVENT FILTER PASS')
           print(report.to_string(index=False))
