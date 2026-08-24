@@ -58,3 +58,18 @@ def test_negative_event_can_trigger_prior_learned_veto():
     last = out.iloc[-1]
     assert last["event_filter_status"] == "AVOID"
     assert bool(last["event_veto"])
+
+
+def test_non_candidate_history_cannot_learn_veto():
+    rows = []
+    raw_rows = []
+    for i in range(25):
+        day = f"2026-01-{i+1:02d}"
+        rows.append({"Date": day, "symbol": "TSLA", "next_ret": -0.05, "v1_top20": False})
+        raw_rows.append(_raw_row(day, f"2026-01-{i+1:02d}T18:00:00Z", "product", negative=1))
+    rows.append({"Date": "2026-02-01", "symbol": "TSLA", "next_ret": 0.02, "v1_top20": True})
+    raw_rows.append(_raw_row("2026-02-01", "2026-02-01T18:00:00Z", "product", negative=1))
+    out = walkforward_filter(pd.DataFrame(rows), pd.DataFrame(raw_rows), min_n=20)
+    last = out.iloc[-1]
+    assert last["event_filter_status"] == "NEUTRAL"
+    assert not bool(last["event_veto"])
