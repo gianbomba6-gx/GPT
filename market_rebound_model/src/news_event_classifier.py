@@ -1,9 +1,4 @@
-"""Deterministic news-event features for rebound-model V2.
-
-V2 intentionally remains deterministic.  For GDELT GKG historical rows the
-headline may be unavailable, so classification falls back to the normalized
-summary/themes field.
-"""
+"""Deterministic event features for causal rebound-model news V3."""
 from __future__ import annotations
 import re
 import pandas as pd
@@ -17,6 +12,7 @@ EVENT_PATTERNS = {
     "product": r"\b(product|launch|recall|delivery|deliveries|production)\b",
     "macro": r"\b(fed|inflation|rates?|interest rate|tariff|recession|gdp)\b",
 }
+EVENT_TYPES = tuple(EVENT_PATTERNS)
 
 NEGATIVE_WORDS = re.compile(r"\b(miss|misses|weak|cut|cuts|lower|warning|decline|falls?|drop|plunge|loss|lawsuit|investigation|fine|downgrade)\b", re.I)
 POSITIVE_WORDS = re.compile(r"\b(beat|beats|strong|raise|raises|higher|growth|profit|upgrade|buy|approval|record)\b", re.I)
@@ -56,10 +52,23 @@ def add_event_features(df: pd.DataFrame) -> pd.DataFrame:
 def build_daily_event_features(df: pd.DataFrame) -> pd.DataFrame:
     x = add_event_features(df)
     x["Date"] = pd.to_datetime(x["published_at"], utc=True).dt.normalize()
-    return (x.groupby(["Date", "symbol"], as_index=False)
+    keys = ["Date", "symbol"]
+    daily = (x.groupby(keys, as_index=False)
         .agg(news_count=("classification_text", "size"),
              negative_news_share=("is_negative_event", "mean"),
              material_event_share=("is_material_event", "mean"),
              event_polarity=("event_polarity", "mean"),
              event_intensity=("event_intensity", "mean"),
              unique_event_types=("event_type", "nunique")))
+    # Reason-specific shares: fraction of the day's classified articles in each event family.
+    event_counts = pd.crosstab([x["Date"], x["symbol"]], x["event_type"]).reset_index()
+    event_counts = event_counts.rename(columns={c: f"event_{c}_share" for c in event_counts.columns if c not in keys})
+    daily = daily.merge(event_counts, on=keys, how="left")
+    for event in EVENT_TYPES + ("other",):
+        col = f"event_{event}_share"
+        if col not in daily.columns:
+            daily[col] = 0.0
+        daily[col] = pd.to_numeric(daily[col], errors="coerce").fillna(0.0)
+        # Crosstab gives counts; convert to fractions after merge.
+        daily[col] = daily[col] / daily["news_count"].clip(lower=1)
+    return daily
