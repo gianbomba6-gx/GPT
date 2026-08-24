@@ -1,0 +1,106 @@
+name: News V3 event conditional diagnostics
+
+on:
+  push:
+    paths:
+      - 'market_rebound_model/src/news_event_conditional_diagnostics.py'
+      - 'market_rebound_model/tests/test_news_event_conditional_diagnostics.py'
+      - '.github/workflows/news-v3-event-conditional-diagnostics.yml'
+  workflow_dispatch:
+
+jobs:
+  diagnostics:
+    name: Causal event conditional diagnostics
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+
+      - name: Run deterministic conditional diagnostics tests
+        run: python -m pytest -q tests/test_news_event_conditional_diagnostics.py
+
+      - name: Find latest successful historical V3 artifact
+        id: artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id=$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/news-v2-historical-backfill.yml/runs?status=success&per_page=20" \
+            --jq '.workflow_runs[0].id')
+          test -n "$run_id" && test "$run_id" != "null"
+          artifact_id=$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name=="news-v3-event-aware-historical-final") | .id' | head -n 1)
+          test -n "$artifact_id"
+          echo "artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
+          echo "Using historical artifact $artifact_id from run $run_id"
+
+      - name: Download existing historical V3 artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.artifact.outputs.artifact_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p results/imported
+          gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" \
+            > /tmp/news-v3-history.zip
+          unzip -q /tmp/news-v3-history.zip -d results/imported
+          find results/imported -type f -name 'latest_news_v3_oos_predictions.csv' -print -quit | xargs -I{} cp {} results/latest_news_v3_oos_predictions.csv
+          find results/imported -type f -name 'news_v2_full_raw.csv' -print -quit | xargs -I{} cp {} results/news_v2_full_raw.csv
+          test -s results/latest_news_v3_oos_predictions.csv
+          test -s results/news_v2_full_raw.csv
+
+      - name: Run causal event conditional diagnostics
+        run: |
+          python src/news_event_conditional_diagnostics.py \
+            results/latest_news_v3_oos_predictions.csv \
+            results/news_v2_full_raw.csv \
+            --out results/news_v3_event_conditional_diagnostics.csv
+
+      - name: Validate causal diagnostic output
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          p = 'results/news_v3_event_conditional_diagnostics.csv'
+          d = pd.read_csv(p)
+          required = {
+              'symbol','event','condition','n','mean_next_ret','median_next_ret',
+              'hit_2pct','hit_3pct','hit_5pct','mean_next_high'
+          }
+          if not required.issubset(d.columns):
+              raise SystemExit(f'Invalid diagnostic schema: {sorted(set(required)-set(d.columns))}')
+          valid = d[d.condition.isin(['event_negative','event_dominant_negative'])]
+          if valid.empty or int(valid['n'].fillna(0).sum()) <= 0:
+              raise SystemExit('No negative-event conditional observations found')
+          if d['condition'].eq('event_present').sum() == 0:
+              raise SystemExit('No event-present diagnostics found')
+          print('CAUSAL EVENT CONDITIONAL PASS')
+          print(d.to_string(index=False))
+          PY
+
+      - name: Upload causal diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: news-v3-event-conditional-diagnostics
+          path: market_rebound_model/results/news_v3_event_conditional_diagnostics.csv
+          if-no-files-found: error
