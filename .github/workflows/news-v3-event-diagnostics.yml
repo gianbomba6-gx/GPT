@@ -1,0 +1,100 @@
+name: News V3 event diagnostics
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnostics:
+    name: OOS event-family diagnostics
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+
+      - name: Run diagnostics unit tests
+        run: python -m pytest -q tests/test_news_event_diagnostics.py
+
+      - name: Find latest successful V3 backtest artifact
+        id: artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id=$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/news-v2-historical-backfill.yml/runs?status=success&per_page=20" \
+            --jq '.workflow_runs[0].id')
+          test -n "$run_id" && test "$run_id" != "null"
+          artifact_id=$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name=="news-v3-event-aware-historical-final") | .id' | head -n 1)
+          test -n "$artifact_id"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
+          echo "Using successful backtest run $run_id, artifact $artifact_id"
+
+      - name: Download V3 OOS predictions artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.artifact.outputs.artifact_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p results/imported
+          gh api \
+            -H 'Accept: application/vnd.github+json' \
+            --method GET \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" \
+            > /tmp/news-v3-artifact.zip
+          unzip -q /tmp/news-v3-artifact.zip -d results/imported
+          oos=$(find results/imported -type f -name 'latest_news_v3_oos_predictions.csv' -print -quit)
+          test -n "$oos"
+          cp "$oos" results/latest_news_v3_oos_predictions.csv
+
+      - name: Analyze event families
+        run: |
+          python src/news_event_diagnostics.py \
+            results/latest_news_v3_oos_predictions.csv \
+            --out results/news_v3_event_diagnostics.csv
+
+      - name: Validate diagnostics
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          d = pd.read_csv('results/news_v3_event_diagnostics.csv')
+          required = {'symbol','event','condition','n','mean_next_ret','median_next_ret','hit_2pct','hit_3pct','hit_5pct','mean_next_high'}
+          missing = required - set(d.columns)
+          if missing:
+              raise SystemExit(f'Missing diagnostics columns: {sorted(missing)}')
+          if d.empty:
+              raise SystemExit('Diagnostics output is empty')
+          primary = d[d['condition'] == 'primary_event']
+          if primary.empty or (primary['n'].fillna(0) <= 0).all():
+              raise SystemExit('No primary-event diagnostics available')
+          print(d.to_string(index=False))
+          print('NEWS V3 EVENT DIAGNOSTICS PASS')
+          PY
+
+      - name: Upload diagnostic artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: news-v3-event-diagnostics
+          path: |
+            market_rebound_model/results/news_v3_event_diagnostics.csv
+            market_rebound_model/results/latest_news_v3_oos_predictions.csv
+          if-no-files-found: error
