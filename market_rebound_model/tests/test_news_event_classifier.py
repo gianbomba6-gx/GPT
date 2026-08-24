@@ -21,7 +21,7 @@ def test_gkg_summary_fallback_when_headline_is_empty():
         "summary": "earnings guidance downgrade",
     }])
     out = add_event_features(df)
-    assert out.loc[0, "classification_text"] == "earnings guidance downgrade  "
+    assert out.loc[0, "classification_text"] == "earnings guidance downgrade"
     assert out.loc[0, "event_type"] in {"earnings", "guidance", "analyst"}
     assert out.loc[0, "is_negative_event"] == 1
 
