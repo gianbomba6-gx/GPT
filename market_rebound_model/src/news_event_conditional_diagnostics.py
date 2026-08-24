@@ -8,7 +8,10 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from src.news_event_classifier import EVENT_TYPES, add_event_features
+try:
+    from .news_event_classifier import EVENT_TYPES, add_event_features
+except ImportError:
+    from news_event_classifier import EVENT_TYPES, add_event_features
 
 MARKET_META = {
     "STLAM.MI": ("Europe/Rome", time(17, 30)),
@@ -116,18 +119,20 @@ def build_conditional_diagnostics(oos: pd.DataFrame, raw: pd.DataFrame) -> pd.Da
     rows: list[dict] = []
     for symbol, s in x.groupby("symbol", sort=True):
         rows.append(_stats(s, symbol, "all", "all_candidates"))
+        dominant_share = pd.concat([
+            pd.to_numeric(s[f"event_{e}_share"], errors="coerce").fillna(0).rename(e)
+            for e in EVENT_TYPES
+        ], axis=1)
+        primary = dominant_share.idxmax(axis=1)
+        max_share = dominant_share.max(axis=1)
         for event in EVENT_TYPES:
             share = pd.to_numeric(s[f"event_{event}_share"], errors="coerce").fillna(0)
             neg_share = pd.to_numeric(s[f"negative_event_{event}_share"], errors="coerce").fillna(0)
             rows.append(_stats(s[share > 0], symbol, event, "event_present"))
             rows.append(_stats(s[neg_share > 0], symbol, event, "event_negative"))
-            dominant_share = pd.concat([pd.to_numeric(s[f"event_{e}_share"], errors="coerce").fillna(0).rename(e) for e in EVENT_TYPES], axis=1)
-            primary = dominant_share.idxmax(axis=1)
-            max_share = dominant_share.max(axis=1)
             dominant = (primary == event) & (max_share > 0)
             rows.append(_stats(s[dominant], symbol, event, "event_dominant"))
-            dominant_negative = dominant & (neg_share > 0)
-            rows.append(_stats(s[dominant_negative], symbol, event, "event_dominant_negative"))
+            rows.append(_stats(s[dominant & (neg_share > 0)], symbol, event, "event_dominant_negative"))
 
     return pd.DataFrame(rows).sort_values(["symbol", "condition", "event"]).reset_index(drop=True)
 
