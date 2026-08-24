@@ -36,6 +36,7 @@ def test_aggregate_daily_keeps_post_close_news_on_candidate_day():
     out = aggregate_daily(raw)
     assert out.iloc[0]["Date"] == pd.Timestamp("2026-08-19")
     assert out.iloc[0]["news_count"] == 1
+    assert out.iloc[0]["event_guidance_share"] == 1.0
 
 
 def test_aggregate_daily_uses_candidate_day_and_event_features():
@@ -51,6 +52,7 @@ def test_aggregate_daily_uses_candidate_day_and_event_features():
     assert out.iloc[0]["news_count"] == 1
     assert out.iloc[0]["negative_news_share"] == 1
     assert out.iloc[0]["news_available"] == 1
+    assert out.iloc[0]["event_earnings_share"] == 1.0
 
 
 def _base_market_dates(values):
@@ -70,6 +72,10 @@ def _news_row(day):
         "news_novelty": 0.0, "news_count": 4, "negative_news_share": 1.0,
         "material_event_share": 1.0, "event_polarity": -1.0,
         "event_intensity": 1.0, "unique_event_types": 2, "news_available": 1.0,
+        "event_earnings_share": 0.5, "event_guidance_share": 0.25,
+        "event_analyst_share": 0.25, "event_regulatory_share": 0.0,
+        "event_ma_share": 0.0, "event_product_share": 0.0,
+        "event_macro_share": 0.0, "event_other_share": 0.0,
     }
 
 
