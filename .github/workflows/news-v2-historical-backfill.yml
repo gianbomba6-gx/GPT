@@ -233,3 +233,5 @@ jobs:
             market_rebound_model/results/news_v2_full_backtest.csv
             market_rebound_model/results/latest_news_v2_oos_predictions.csv
           if-no-files-found: error
+
+# Queue-refresh marker: this comment intentionally triggers a fresh push run without changing model behavior.
