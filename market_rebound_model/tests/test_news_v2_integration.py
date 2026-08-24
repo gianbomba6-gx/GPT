@@ -2,6 +2,7 @@ from datetime import date
 import pandas as pd
 
 from src.gkg_candidate_backfill import close_utc, filter_at_close, aggregate_daily
+from src.live_alert import add_market_regime
 from src.news_v2_backtest import merge_news
 
 
@@ -98,3 +99,22 @@ def test_merge_news_normalizes_pandas_datetime_resolution_before_asof_merge():
     news = pd.DataFrame([_news_row(news_dates.iloc[0])])
     out = merge_news(market, news, "NVDA")
     assert out.loc[out["Date"] == pd.Timestamp("2026-08-19"), "news_count"].iloc[0] == 4
+
+
+def _regime_frame(date_values):
+    return pd.DataFrame({
+        "Date": pd.to_datetime(date_values),
+        "Ultimo": [100.0, 98.0], "ret": [0.0, -0.02],
+        "ret_5": [0.0, -0.01], "ret_20": [0.0, -0.02],
+    })
+
+
+def test_add_market_regime_normalizes_datetime_resolution_before_asof_merge():
+    frames = {"NVDA": _regime_frame(["2026-08-18", "2026-08-19"])}
+    benchmark = pd.DataFrame({
+        "Date": pd.to_datetime(["2026-08-18", "2026-08-19"]).astype("datetime64[s]"),
+        "Ultimo": [100.0, 101.0],
+    })
+    out = add_market_regime(frames, benchmark)
+    assert list(out["NVDA"]["Date"]) == list(pd.to_datetime(["2026-08-18", "2026-08-19"]))
+    assert out["NVDA"]["mkt_ret"].notna().any()
