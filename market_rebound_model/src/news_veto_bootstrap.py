@@ -9,20 +9,52 @@ import pandas as pd
 
 
 def bootstrap_delta(rows: pd.DataFrame, n_boot: int = 10000, seed: int = 42) -> dict:
-    """Bootstrap mean-ret difference (keep minus all) on paired OOS rows by resampling all rows."""
-    x = rows["next_ret"].dropna().to_numpy(dtype=float)
-    keep = rows.loc[rows["event_filter_keep"].astype(bool), "next_ret"].dropna().to_numpy(dtype=float)
-    if len(x) == 0 or len(keep) == 0:
-        return {"n_all": len(x), "n_keep": len(keep), "delta_mean": np.nan, "ci_low": np.nan, "ci_high": np.nan}
-    observed = float(keep.mean() - x.mean())
+    """Bootstrap keep-minus-all mean difference on paired OOS rows.
+
+    Each bootstrap resample draws row indices from the original OOS sample and
+    recomputes both means on that same resample. This preserves the fact that
+    the kept set is a subset of the full set.
+    """
+    x = rows.loc[rows["next_ret"].notna(), ["next_ret", "event_filter_keep"]].copy()
+    if x.empty:
+        return {"n_all": 0, "n_keep": 0, "delta_mean": np.nan, "ci_low": np.nan, "ci_high": np.nan}
+
+    x["next_ret"] = pd.to_numeric(x["next_ret"], errors="coerce")
+    x = x.dropna(subset=["next_ret"]).reset_index(drop=True)
+    x["event_filter_keep"] = x["event_filter_keep"].astype(bool)
+    keep_mask = x["event_filter_keep"].to_numpy()
+    n_all = len(x)
+    n_keep = int(keep_mask.sum())
+    if n_keep == 0:
+        return {"n_all": n_all, "n_keep": 0, "delta_mean": np.nan, "ci_low": np.nan, "ci_high": np.nan}
+
+    values = x["next_ret"].to_numpy(dtype=float)
+    observed = float(values[keep_mask].mean() - values.mean())
+
     rng = np.random.default_rng(seed)
     boot = np.empty(n_boot, dtype=float)
     for i in range(n_boot):
-        sample = rng.choice(x, size=len(x), replace=True)
-        sample_keep = rng.choice(keep, size=len(keep), replace=True)
-        boot[i] = sample_keep.mean() - sample.mean()
+        idx = rng.integers(0, n_all, size=n_all)
+        sample_values = values[idx]
+        sample_keep = keep_mask[idx]
+        keep_count = int(sample_keep.sum())
+        if keep_count == 0:
+            boot[i] = np.nan
+        else:
+            boot[i] = float(sample_values[sample_keep].mean() - sample_values.mean())
+
+    boot = boot[np.isfinite(boot)]
+    if boot.size == 0:
+        return {"n_all": n_all, "n_keep": n_keep, "delta_mean": observed, "ci_low": np.nan, "ci_high": np.nan}
+
     lo, hi = np.quantile(boot, [0.025, 0.975])
-    return {"n_all": len(x), "n_keep": len(keep), "delta_mean": observed, "ci_low": float(lo), "ci_high": float(hi)}
+    return {
+        "n_all": n_all,
+        "n_keep": n_keep,
+        "delta_mean": observed,
+        "ci_low": float(lo),
+        "ci_high": float(hi),
+    }
 
 
 def main() -> None:
@@ -46,7 +78,7 @@ def main() -> None:
     overall = bootstrap_delta(rows, n_boot=args.n_boot)
     overall["symbol"] = "ALL"
     out.append(overall)
-    report = pd.DataFrame(out)[["symbol","n_all","n_keep","delta_mean","ci_low","ci_high"]]
+    report = pd.DataFrame(out)[["symbol", "n_all", "n_keep", "delta_mean", "ci_low", "ci_high"]]
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     report.to_csv(args.out, index=False)
     print(report.to_string(index=False))
