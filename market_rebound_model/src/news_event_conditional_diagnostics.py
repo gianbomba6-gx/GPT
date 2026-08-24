@@ -114,15 +114,30 @@ def build_conditional_diagnostics(oos: pd.DataFrame, raw: pd.DataFrame) -> pd.Da
     if event_days.empty:
         raise ValueError("No causal event-day features available after market-close filtering")
     event_days["Date"] = pd.to_datetime(event_days["Date"], errors="coerce").dt.normalize()
-    x = x.merge(event_days, on=["Date", "symbol"], how="left")
+
+    event_share_cols = [f"event_{event}_share" for event in EVENT_TYPES]
+    negative_share_cols = [f"negative_event_{event}_share" for event in EVENT_TYPES]
+    event_merge_cols = ["Date", "symbol", *event_share_cols, *negative_share_cols]
+    event_merge_cols = [c for c in event_merge_cols if c in event_days.columns]
+    x = x.merge(event_days[event_merge_cols], on=["Date", "symbol"], how="left", suffixes=("", "_causal"))
+
+    for col in event_share_cols + negative_share_cols:
+        causal_col = f"{col}_causal"
+        if causal_col in x.columns:
+            x[col] = pd.to_numeric(x[causal_col], errors="coerce").fillna(0.0)
+            x.drop(columns=[causal_col], inplace=True)
+        elif col not in x.columns:
+            x[col] = 0.0
+        else:
+            x[col] = pd.to_numeric(x[col], errors="coerce").fillna(0.0)
 
     rows: list[dict] = []
     for symbol, s in x.groupby("symbol", sort=True):
         rows.append(_stats(s, symbol, "all", "all_candidates"))
-        dominant_share = pd.concat([
-            pd.to_numeric(s[f"event_{e}_share"], errors="coerce").fillna(0).rename(e)
-            for e in EVENT_TYPES
-        ], axis=1)
+        dominant_share = pd.concat(
+            [pd.to_numeric(s[f"event_{e}_share"], errors="coerce").fillna(0).rename(e) for e in EVENT_TYPES],
+            axis=1,
+        )
         primary = dominant_share.idxmax(axis=1)
         max_share = dominant_share.max(axis=1)
         for event in EVENT_TYPES:
