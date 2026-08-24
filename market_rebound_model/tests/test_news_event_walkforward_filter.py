@@ -4,15 +4,14 @@ from src.news_event_walkforward_filter import walkforward_filter
 
 
 def _raw_row(day: str, published: str, event_type: str, negative: int = 1):
+    tone = " decline" if negative else ""
     return {
         "candidate_day": day,
         "published_at": published,
         "symbol": "TSLA",
-        "headline": f"{event_type} news",
+        "headline": f"{event_type}{tone} news",
         "url": "https://example.com/story",
-        "summary": event_type,
-        "event_type": event_type,
-        "is_negative_event": negative,
+        "summary": f"{event_type}{tone}",
     }
 
 
@@ -51,11 +50,10 @@ def test_negative_event_can_trigger_prior_learned_veto():
     raw_rows = []
     for i in range(25):
         day = f"2026-01-{i+1:02d}"
-        ret = -0.05
-        rows.append({"Date": day, "symbol": "TSLA", "next_ret": ret, "v1_top20": True})
-        raw_rows.append(_raw_row(day, f"2026-01-{i+1:02d}T18:00:00Z", "product"))
+        rows.append({"Date": day, "symbol": "TSLA", "next_ret": -0.05, "v1_top20": True})
+        raw_rows.append(_raw_row(day, f"2026-01-{i+1:02d}T18:00:00Z", "product", negative=1))
     rows.append({"Date": "2026-02-01", "symbol": "TSLA", "next_ret": 0.02, "v1_top20": True})
-    raw_rows.append(_raw_row("2026-02-01", "2026-02-01T18:00:00Z", "product"))
+    raw_rows.append(_raw_row("2026-02-01", "2026-02-01T18:00:00Z", "product", negative=1))
     out = walkforward_filter(pd.DataFrame(rows), pd.DataFrame(raw_rows), min_n=20)
     last = out.iloc[-1]
     assert last["event_filter_status"] == "AVOID"
