@@ -1,10 +1,4 @@
-"""Candidate-day GDELT GKG backfill for causal rebound research.
-
-Downloads GKG only for days where a tracked stock falls at least the configured
-threshold. The model decision is made after that day's close, so every article
-published on the same calendar day—including post-close articles—is available
-for the next-session prediction and remains aligned to the candidate day.
-"""
+"""Candidate-day GDELT GKG backfill for causal rebound research."""
 from __future__ import annotations
 
 import argparse
@@ -18,10 +12,10 @@ import yfinance as yf
 
 try:
     from .gkg_historical_news import GkgHistoricalProvider
-    from .news_event_classifier import add_event_features
+    from .news_event_classifier import EVENT_TYPES, add_event_features
 except ImportError:
     from gkg_historical_news import GkgHistoricalProvider
-    from news_event_classifier import add_event_features
+    from news_event_classifier import EVENT_TYPES, add_event_features
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = json.loads((ROOT / "config" / "tickers.json").read_text())
@@ -45,9 +39,6 @@ def fetch_prices(symbol: str, start: str, end: str) -> pd.DataFrame:
         progress=False,
     )
     if raw.empty:
-        # A tracked symbol may legitimately have no history in an earlier year
-        # (SPCX is only present from 2026). Return an empty frame so the caller
-        # can skip that symbol for this year instead of failing the whole job.
         return pd.DataFrame(columns=["Date", "ret"])
     if isinstance(raw.columns, pd.MultiIndex):
         raw.columns = raw.columns.get_level_values(0)
@@ -90,6 +81,7 @@ def aggregate_daily(raw: pd.DataFrame) -> pd.DataFrame:
         "Date", "symbol", "news_sentiment", "news_intensity", "news_relevance",
         "news_novelty", "news_count", "negative_news_share", "material_event_share",
         "event_polarity", "event_intensity", "unique_event_types", "news_available",
+        *[f"event_{event}_share" for event in EVENT_TYPES], "event_other_share",
     ]
     if raw.empty:
         return pd.DataFrame(columns=columns)
@@ -98,8 +90,8 @@ def aggregate_daily(raw: pd.DataFrame) -> pd.DataFrame:
     x["published_at"] = pd.to_datetime(x["published_at"], utc=True, errors="coerce")
     x["candidate_day"] = pd.to_datetime(x["candidate_day"], errors="coerce").dt.normalize()
     x = x.dropna(subset=["published_at", "candidate_day", "symbol"]).copy()
-
     x["Date"] = x["candidate_day"]
+
     daily = (x.groupby(["Date", "symbol"], as_index=False)
         .agg(news_sentiment=("sentiment", "mean"),
              news_intensity=("intensity", "mean"),
@@ -111,6 +103,18 @@ def aggregate_daily(raw: pd.DataFrame) -> pd.DataFrame:
              event_polarity=("event_polarity", "mean"),
              event_intensity=("event_intensity", "mean"),
              unique_event_types=("event_type", "nunique")))
+
+    event_counts = pd.crosstab([x["Date"], x["symbol"]], x["event_type"]).reset_index()
+    event_counts = event_counts.rename(columns={
+        c: f"event_{c}_share" for c in event_counts.columns if c not in {"Date", "symbol"}
+    })
+    daily = daily.merge(event_counts, on=["Date", "symbol"], how="left")
+    for event in EVENT_TYPES + ("other",):
+        col = f"event_{event}_share"
+        if col not in daily.columns:
+            daily[col] = 0.0
+        daily[col] = pd.to_numeric(daily[col], errors="coerce").fillna(0.0) / daily["news_count"].clip(lower=1)
+
     daily["news_available"] = 1.0
     return daily[columns]
 
