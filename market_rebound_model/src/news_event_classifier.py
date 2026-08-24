@@ -4,18 +4,18 @@ import re
 import pandas as pd
 
 EVENT_PATTERNS = {
-    "earnings": r"\b(earnings|revenue|profit|eps|quarterly results|results)\b",
+    "earnings": r"\b(earnings|revenue|profit|eps|quarterly results|results|quarterly|financial results)\b",
     "guidance": r"\b(guidance|outlook|forecast|raises? guidance|cuts? guidance)\b",
     "analyst": r"\b(upgrade|downgrade|price target|analyst|rating)\b",
-    "regulatory": r"\b(regulator|regulatory|antitrust|lawsuit|investigation|fine|sec)\b",
-    "ma": r"\b(acquire|acquisition|merger|takeover|deal)\b",
-    "product": r"\b(product|launch|recall|delivery|deliveries|production)\b",
-    "macro": r"\b(fed|inflation|rates?|interest rate|tariff|recession|gdp)\b",
+    "regulatory": r"\b(regulator|regulatory|antitrust|lawsuit|investigation|fine|sec|probe|settlement)\b",
+    "ma": r"\b(acquire|acquisition|merger|takeover|deal|buyout)\b",
+    "product": r"\b(product|launch|recall|delivery|deliveries|production|manufacturing|model)\b",
+    "macro": r"\b(fed|inflation|rates?|interest rate|tariff|recession|gdp|jobs report|unemployment)\b",
 }
 EVENT_TYPES = tuple(EVENT_PATTERNS)
 
-NEGATIVE_WORDS = re.compile(r"\b(miss|misses|weak|cut|cuts|lower|warning|decline|falls?|drop|plunge|loss|lawsuit|investigation|fine|downgrade)\b", re.I)
-POSITIVE_WORDS = re.compile(r"\b(beat|beats|strong|raise|raises|higher|growth|profit|upgrade|buy|approval|record)\b", re.I)
+NEGATIVE_WORDS = re.compile(r"\b(miss|misses|weak|cut|cuts|lower|warning|decline|falls?|drop|plunge|loss|lawsuit|investigation|fine|downgrade|slump|slowdown)\b", re.I)
+POSITIVE_WORDS = re.compile(r"\b(beat|beats|strong|raise|raises|higher|growth|profit|upgrade|buy|approval|record|rebound)\b", re.I)
 
 
 def classify_headline(text: str) -> tuple[str, float, float]:
@@ -32,13 +32,18 @@ def classify_headline(text: str) -> tuple[str, float, float]:
 
 def add_event_features(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    if "headline" not in out.columns:
-        out["headline"] = ""
-    if "summary" not in out.columns:
-        out["summary"] = ""
-    text = out["headline"].fillna("").astype(str).str.strip()
-    fallback = out["summary"].fillna("").astype(str).str.strip()
-    text = text.where(text.ne(""), fallback)
+    for col in ("headline", "summary", "url"):
+        if col not in out.columns:
+            out[col] = ""
+    headline = out["headline"].fillna("").astype(str).str.strip()
+    summary = out["summary"].fillna("").astype(str).str.strip()
+    url = out["url"].fillna("").astype(str).str.strip()
+    # GDELT GKG does not carry a clean headline in the historical rows used by V3.
+    # The article URL often contains the publisher's slug, so use it as a deterministic
+    # fallback together with the GKG themes string instead of collapsing everything to 'other'.
+    text = headline.where(headline.ne(""), "")
+    text = text + " " + summary + " " + url.str.replace(r"[-_/+?.=&%]+", " ", regex=True)
+    text = text.str.replace(r"\s+", " ", regex=True).str.strip()
     classified = text.map(classify_headline)
     out["classification_text"] = text
     out["event_type"] = classified.map(lambda x: x[0])
@@ -60,7 +65,6 @@ def build_daily_event_features(df: pd.DataFrame) -> pd.DataFrame:
              event_polarity=("event_polarity", "mean"),
              event_intensity=("event_intensity", "mean"),
              unique_event_types=("event_type", "nunique")))
-    # Reason-specific shares: fraction of the day's classified articles in each event family.
     event_counts = pd.crosstab([x["Date"], x["symbol"]], x["event_type"]).reset_index()
     event_counts = event_counts.rename(columns={c: f"event_{c}_share" for c in event_counts.columns if c not in keys})
     daily = daily.merge(event_counts, on=keys, how="left")
@@ -69,6 +73,5 @@ def build_daily_event_features(df: pd.DataFrame) -> pd.DataFrame:
         if col not in daily.columns:
             daily[col] = 0.0
         daily[col] = pd.to_numeric(daily[col], errors="coerce").fillna(0.0)
-        # Crosstab gives counts; convert to fractions after merge.
         daily[col] = daily[col] / daily["news_count"].clip(lower=1)
     return daily
