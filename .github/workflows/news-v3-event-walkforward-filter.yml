@@ -1,0 +1,114 @@
+name: News V3 walk-forward event filter
+
+on:
+  push:
+    paths:
+      - 'market_rebound_model/src/news_event_walkforward_filter.py'
+      - 'market_rebound_model/tests/test_news_event_walkforward_filter.py'
+      - '.github/workflows/news-v3-event-walkforward-filter.yml'
+  workflow_dispatch:
+
+jobs:
+  filter:
+    name: Out-of-sample event filter
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+
+      - name: Run deterministic filter tests
+        run: python -m pytest -q tests/test_news_event_walkforward_filter.py
+
+      - name: Find latest successful historical V3 artifact
+        id: artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id=$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/news-v2-historical-backfill.yml/runs?status=success&per_page=20" \
+            --jq '.workflow_runs[0].id')
+          test -n "$run_id" && test "$run_id" != "null"
+          artifact_id=$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name=="news-v3-event-aware-historical-final") | .id' | head -n 1)
+          test -n "$artifact_id"
+          echo "artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
+          echo "Using historical artifact $artifact_id from run $run_id"
+
+      - name: Download existing historical V3 artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.artifact.outputs.artifact_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p results/imported
+          gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" \
+            > /tmp/news-v3-history.zip
+          unzip -q /tmp/news-v3-history.zip -d results/imported
+          oos=$(find results/imported -type f -name 'latest_news_v3_oos_predictions.csv' -print -quit)
+          raw=$(find results/imported -type f -name 'news_v2_full_raw.csv' -print -quit)
+          test -n "$oos" && test -n "$raw"
+          cp "$oos" results/latest_news_v3_oos_predictions.csv
+          cp "$raw" results/news_v2_full_raw.csv
+          test -s results/latest_news_v3_oos_predictions.csv
+          test -s results/news_v2_full_raw.csv
+
+      - name: Run walk-forward event filter
+        run: |
+          python src/news_event_walkforward_filter.py \
+            results/latest_news_v3_oos_predictions.csv \
+            results/news_v2_full_raw.csv \
+            --out results/news_v3_event_walkforward_filter.csv \
+            --min-n 20
+
+      - name: Validate walk-forward output
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          report = pd.read_csv('results/news_v3_event_walkforward_filter.csv')
+          rows = pd.read_csv('results/news_v3_event_walkforward_filter_rows.csv')
+          required = {'set','n','mean_next_ret','hit_2pct','hit_3pct','hit_5pct'}
+          if not required.issubset(report.columns):
+              raise SystemExit(f'Invalid report schema: {sorted(required - set(report.columns))}')
+          required_rows = {'Date','symbol','next_ret','event_filter_status','event_veto','event_filter_keep'}
+          if not required_rows.issubset(rows.columns):
+              raise SystemExit(f'Invalid rows schema: {sorted(required_rows - set(rows.columns))}')
+          if rows.empty:
+              raise SystemExit('Empty walk-forward event-filter rows')
+          if rows['event_veto'].dtype != bool:
+              raise SystemExit('event_veto is not boolean')
+          if rows['event_filter_status'].isin(['FAVORABLE','AVOID']).any() is False:
+              raise SystemExit('No learned event rules were applied OOS')
+          print('WALK-FORWARD EVENT FILTER PASS')
+          print(report.to_string(index=False))
+          print(f"VETOED_ROWS={int(rows['event_veto'].sum())}")
+          PY
+
+      - name: Upload walk-forward event filter artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: news-v3-event-walkforward-filter
+          path: |
+            market_rebound_model/results/news_v3_event_walkforward_filter.csv
+            market_rebound_model/results/news_v3_event_walkforward_filter_rows.csv
+          if-no-files-found: error
