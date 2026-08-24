@@ -69,8 +69,18 @@ def _event_features(raw: pd.DataFrame) -> pd.DataFrame:
 
 
 def _rule_from_history(history: pd.DataFrame, symbol: str, event: str, condition: str, min_n: int) -> str:
-    h = history[(history.symbol == symbol) & (history.condition == condition) & (history.event == event)]
-    if h.empty or len(h) == 0:
+    """Return a learned rule, treating an empty/no-schema history as insufficient data."""
+    if history.empty:
+        return "INSUFFICIENT"
+    required = {"symbol", "condition", "event", "n", "mean_next_ret", "baseline_mean_next_ret", "delta_hit_2pct", "delta_hit_3pct", "delta_hit_5pct"}
+    if not required.issubset(history.columns):
+        return "INSUFFICIENT"
+    h = history[
+        (history["symbol"] == symbol)
+        & (history["condition"] == condition)
+        & (history["event"] == event)
+    ]
+    if h.empty:
         return "INSUFFICIENT"
     n = int(h["n"].iloc[0])
     if n < min_n:
