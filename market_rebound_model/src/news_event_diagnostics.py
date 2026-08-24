@@ -61,13 +61,13 @@ def build_diagnostics(data: pd.DataFrame) -> pd.DataFrame:
             present = s[s[col] > 0]
             rows.append(stats(present, "present", symbol, event, "event_present"))
 
-        share_matrix = s[[c for c in share_cols.values()]].copy()
+        share_matrix = s[list(share_cols.values())].copy()
         share_matrix.columns = list(share_cols.keys())
         primary = share_matrix.idxmax(axis=1)
         max_share = share_matrix.max(axis=1)
         for event in share_cols:
             dominant = s[(primary == event) & (max_share > 0)]
-            rows.append(stats(dominant, "dominant", symbol, event, "primary_event"))
+            rows.append(stats(dominant, "dominant", symbol, event, "dominant"))
 
     return pd.DataFrame(rows)
 
