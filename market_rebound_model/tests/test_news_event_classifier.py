@@ -36,7 +36,44 @@ def test_gkg_url_slug_fallback_when_headline_is_empty():
     }])
     out = add_event_features(df)
     assert out.loc[0, "event_type"] == "earnings"
+    assert out.loc[0, "event_source"] == "url"
     assert out.loc[0, "is_negative_event"] == 1
+
+
+def test_gkg_theme_fallback_uses_only_specific_theme_tokens():
+    df = pd.DataFrame([
+        {
+            "published_at": "2026-08-20T12:00:00Z",
+            "symbol": "NVDA",
+            "headline": "",
+            "url": "",
+            "summary": "ECON_EARNINGS;ECON_STOCKMARKET",
+        },
+        {
+            "published_at": "2026-08-20T12:00:00Z",
+            "symbol": "NVDA",
+            "headline": "",
+            "url": "",
+            "summary": "ECON_STOCKMARKET",
+        },
+    ])
+    out = add_event_features(df)
+    assert out.loc[0, "event_type"] == "earnings"
+    assert out.loc[0, "event_source"] == "gkg_theme"
+    assert out.loc[1, "event_type"] == "other"
+
+
+def test_article_text_overrides_broad_theme_noise():
+    df = pd.DataFrame([{
+        "published_at": "2026-08-20T12:00:00Z",
+        "symbol": "TSLA",
+        "headline": "Tesla shares rise after analyst upgrade",
+        "summary": "TAX_FNCACT_ANALYSTS;ECON_STOCKMARKET;EPU_ECONOMY",
+        "url": "https://example.com/tesla-stock",
+    }])
+    out = add_event_features(df)
+    assert out.loc[0, "event_type"] == "analyst"
+    assert out.loc[0, "event_source"] == "headline"
 
 
 def test_daily_aggregation_is_date_safe():
