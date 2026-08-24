@@ -30,6 +30,7 @@ jobs:
             tests/test_gdelt_news.py \
             tests/test_gkg_historical_news.py \
             tests/test_news_event_classifier.py \
+            tests/test_news_event_diagnostics.py \
             tests/test_news_v2_integration.py
 
   yearly_backfill:
@@ -192,6 +193,29 @@ jobs:
           print(d.to_string(index=False))
           print('NEWS V3 EVENT-AWARE HISTORICAL BACKTEST PASS')
           PY
+      - name: Analyze out-of-sample event families
+        run: |
+          python src/news_event_diagnostics.py \
+            results/latest_news_v3_oos_predictions.csv \
+            --out results/news_v3_event_diagnostics.csv
+      - name: Validate event diagnostics
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          d = pd.read_csv('results/news_v3_event_diagnostics.csv')
+          required = {'symbol','event','condition','n','mean_next_ret','median_next_ret','hit_2pct','hit_3pct','hit_5pct','mean_next_high'}
+          missing = required - set(d.columns)
+          if missing:
+              raise SystemExit(f'Missing diagnostics columns: {sorted(missing)}')
+          events = {'earnings','guidance','analyst','regulatory','ma','product','macro','other'}
+          if d.empty or not set(d['event']).issubset(events | {'all'}):
+              raise SystemExit('Event diagnostics are empty or contain unknown event families')
+          primary = d[d['condition'] == 'primary_event']
+          if primary.empty or (primary['n'].fillna(0) <= 0).all():
+              raise SystemExit('No primary-event diagnostics available')
+          print(d.to_string(index=False))
+          print('NEWS V3 EVENT DIAGNOSTICS PASS')
+          PY
       - name: Upload final historical artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -201,4 +225,5 @@ jobs:
             market_rebound_model/results/news_v2_full_daily.csv
             market_rebound_model/results/news_v3_event_aware_backtest.csv
             market_rebound_model/results/latest_news_v3_oos_predictions.csv
+            market_rebound_model/results/news_v3_event_diagnostics.csv
           if-no-files-found: error
