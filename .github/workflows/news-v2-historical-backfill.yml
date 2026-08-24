@@ -2,20 +2,6 @@ name: News V2 historical backfill
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - 'market_rebound_model/src/gkg_candidate_backfill.py'
-      - 'market_rebound_model/src/gkg_historical_news.py'
-      - 'market_rebound_model/src/news_v2_backtest.py'
-      - 'market_rebound_model/src/news_event_classifier.py'
-      - 'market_rebound_model/src/rebound_model.py'
-      - 'market_rebound_model/live_alert.py'
-      - 'market_rebound_model/rebound_model.py'
-      - 'market_rebound_model/config/tickers.json'
-      - 'market_rebound_model/tests/test_gkg_historical_news.py'
-      - 'market_rebound_model/tests/test_news_v2_integration.py'
-      - 'market_rebound_model/requirements.txt'
-      - '.github/workflows/news-v2-historical-backfill.yml'
 
 concurrency:
   group: news-v2-historical-backfill
@@ -233,5 +219,3 @@ jobs:
             market_rebound_model/results/news_v2_full_backtest.csv
             market_rebound_model/results/latest_news_v2_oos_predictions.csv
           if-no-files-found: error
-
-# Queue-refresh marker: this comment intentionally triggers a fresh push run without changing model behavior.
