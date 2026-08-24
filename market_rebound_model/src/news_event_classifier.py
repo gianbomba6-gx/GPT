@@ -21,7 +21,7 @@ EVENT_PATTERNS = {
 EVENT_TYPES = tuple(EVENT_PATTERNS)
 
 # High-confidence GKG theme tokens used only when the article-language fields
-# do not identify an event.  We intentionally avoid generic stock-market tags.
+# do not identify an event. We intentionally avoid generic stock-market tags.
 THEME_EVENT_TOKENS = {
     "earnings": ("ECON_EARNINGS",),
     "guidance": (),
@@ -54,6 +54,16 @@ def _normalize_article_text(value: object) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
+def _looks_like_gkg_theme_string(text: str) -> bool:
+    """Identify the semicolon-delimited uppercase taxonomy strings used by GKG."""
+    if not text or ";" not in text:
+        return False
+    parts = [part.strip() for part in text.split(";")]
+    return bool(parts) and all(
+        part and re.fullmatch(r"[A-Z0-9]+(?:_[A-Z0-9]+)+", part) for part in parts
+    )
+
+
 def _event_matches(text: str) -> list[str]:
     low = text.lower()
     return [name for name, pattern in EVENT_PATTERNS.items() if re.search(pattern, low)]
@@ -74,14 +84,21 @@ def classify_headline(text: str) -> tuple[str, float, float]:
 def classify_article(headline: str, summary: str, url: str) -> tuple[str, float, float, str]:
     """Classify an article using high-confidence text before GKG themes.
 
-    Priority is headline > URL slug > specific GKG theme token.  This avoids
-    treating broad taxonomy labels such as ECON_STOCKMARKET as event types.
+    Priority is headline > URL slug > natural-language summary > specific GKG
+    theme token. Broad taxonomy labels such as ECON_STOCKMARKET are ignored as
+    direct event evidence.
     """
     headline = _normalize_article_text(headline)
     summary = _normalize_article_text(summary)
     url_text = re.sub(r"[-_/+?.=&%]+", " ", _normalize_article_text(url))
 
-    source_texts = ((6, "headline", headline), (4, "url", url_text))
+    source_texts: list[tuple[int, str, str]] = [
+        (6, "headline", headline),
+        (4, "url", url_text),
+    ]
+    if summary and not _looks_like_gkg_theme_string(summary):
+        source_texts.append((2, "summary", summary))
+
     candidates: list[tuple[int, int, str, str]] = []
     for source_weight, source_name, text in source_texts:
         if not text:
@@ -89,7 +106,7 @@ def classify_article(headline: str, summary: str, url: str) -> tuple[str, float,
         for event_index, (event, pattern) in enumerate(EVENT_PATTERNS.items()):
             if re.search(pattern, text.lower()):
                 # Lower event_index wins ties; this keeps the existing event
-                # order deterministic when one slug mentions two event families.
+                # order deterministic when one text mentions two event families.
                 candidates.append((source_weight, -event_index, event, source_name))
 
     if candidates:
@@ -107,13 +124,15 @@ def classify_article(headline: str, summary: str, url: str) -> tuple[str, float,
                 classification_source = "gkg_theme"
                 break
 
-    # Sentiment remains text-based, using the actual article language/slug first
-    # and GKG themes only as a fallback when no article text exists.
+    # Sentiment remains text-based, using article language/slug first and GKG
+    # themes only as a fallback when no article language is available.
     sentiment_text = " ".join(x for x in (headline, url_text, summary) if x)
     neg = len(NEGATIVE_WORDS.findall(sentiment_text))
     pos = len(POSITIVE_WORDS.findall(sentiment_text))
     polarity = (pos - neg) / max(pos + neg, 1)
     direct_matches = len(_event_matches(" ".join(x for x in (headline, url_text) if x)))
+    if classification_source == "summary" and summary:
+        direct_matches = max(direct_matches, len(_event_matches(summary)))
     theme_match = 1 if classification_source == "gkg_theme" else 0
     event_intensity = min(1.0, (direct_matches + theme_match + neg + pos) / 4.0)
     return event, polarity, event_intensity, classification_source
