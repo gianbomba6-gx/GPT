@@ -175,8 +175,13 @@ def walkforward_filter(oos: pd.DataFrame, raw: pd.DataFrame, min_n: int = MIN_N)
     x["Date"] = pd.to_datetime(x["Date"], errors="coerce").dt.normalize()
     x["symbol"] = x["symbol"].astype(str).str.upper().str.strip()
     x["next_ret"] = pd.to_numeric(x["next_ret"], errors="coerce")
+    x["v1_top20"] = x["v1_top20"].fillna(False).astype(bool)
     x = x.dropna(subset=["Date", "symbol"]).sort_values(["Date", "symbol"]).reset_index(drop=True)
     events = _event_features(raw)
+    # Event shares used by this filter must come from the raw, close-of-market
+    # reconstruction, not precomputed V3 columns already present in OOS.
+    raw_event_cols = [f"event_{e}_share" for e in EVENT_TYPES]
+    x = x.drop(columns=[c for c in raw_event_cols if c in x.columns], errors="ignore")
     x = x.merge(events, on=["Date", "symbol"], how="left")
     for event in EVENT_TYPES:
         for prefix in ("event", "negative_event"):
@@ -189,11 +194,12 @@ def walkforward_filter(oos: pd.DataFrame, raw: pd.DataFrame, min_n: int = MIN_N)
     dates = sorted(pd.to_datetime(x["Date"]).dropna().unique())
     for day in dates:
         day_ts = pd.Timestamp(day)
-        prior = x[x["Date"] < day_ts].copy()
+        # Learn from the same V1-top20 population that is being filtered.
+        # Non-candidate days must not dilute or reverse the event rule.
+        prior = x[(x["Date"] < day_ts) & x["v1_top20"]].copy()
         test = x[x["Date"] == day_ts].copy()
         if test.empty:
             continue
-        # Rules are learned exclusively from dates strictly before the test date.
         rules = _history_ranking(prior, min_n=min_n) if not prior.empty else pd.DataFrame()
         for idx, row in test.iterrows():
             if not bool(row.get("v1_top20", False)):
