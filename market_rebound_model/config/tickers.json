@@ -9,6 +9,8 @@
   "signal": {
     "down_day_threshold": -0.02,
     "alert_probability_threshold": 0.70,
+    "threshold_mode": "dynamic_top10",
+    "dynamic_top_quantile": 0.90,
     "target_return": 0.03
   }
 }
