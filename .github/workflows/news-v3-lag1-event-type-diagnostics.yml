@@ -1,0 +1,120 @@
+name: News V3 lag1 event type diagnostics
+
+on:
+  workflow_dispatch:
+
+jobs:
+  event-type-diagnostics:
+    name: Prior-day news by event type
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+
+      - name: Find latest usable walk-forward artifact
+        id: wf_artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id=$(gh api -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/news-v3-event-walkforward-filter.yml/runs?status=success&per_page=20" \
+            --jq '.workflow_runs[0].id')
+          test -n "$run_id" && test "$run_id" != null
+          artifact_id=$(gh api -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name=="news-v3-event-walkforward-filter") | .id' | head -n1)
+          test -n "$artifact_id"
+          echo "artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
+
+      - name: Find latest historical artifact with raw GKG
+        id: hist_artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id=$(gh api -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/news-v2-historical-backfill.yml/runs?status=success&per_page=20" \
+            --jq '.workflow_runs[0].id')
+          test -n "$run_id" && test "$run_id" != null
+          artifact_id=$(gh api -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name=="news-v3-event-aware-historical-final") | .id' | head -n1)
+          test -n "$artifact_id"
+          echo "artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
+
+      - name: Download diagnostic inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WF_ARTIFACT_ID: ${{ steps.wf_artifact.outputs.artifact_id }}
+          HIST_ARTIFACT_ID: ${{ steps.hist_artifact.outputs.artifact_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p results/imported/wf results/imported/hist
+          gh api -H 'Accept: application/vnd.github+json' "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${WF_ARTIFACT_ID}/zip" > /tmp/ranking.zip
+          gh api -H 'Accept: application/vnd.github+json' "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${HIST_ARTIFACT_ID}/zip" > /tmp/history.zip
+          unzip -q /tmp/ranking.zip -d results/imported/wf
+          unzip -q /tmp/history.zip -d results/imported/hist
+          rows=$(find results/imported/wf -type f -name 'news_v3_event_walkforward_filter_rows.csv' -print -quit)
+          raw=$(find results/imported/hist -type f -name 'news_v2_full_raw.csv' -print -quit)
+          test -n "$rows"
+          test -n "$raw"
+          cp "$rows" results/news_v3_event_walkforward_filter_rows.csv
+          cp "$raw" results/news_v2_full_raw.csv
+          test -s results/news_v3_event_walkforward_filter_rows.csv
+          test -s results/news_v2_full_raw.csv
+
+      - name: Run event-type diagnostics
+        run: |
+          python src/news_v3_lag1_event_type_diagnostics.py \
+            results/news_v3_event_walkforward_filter_rows.csv \
+            results/news_v2_full_raw.csv \
+            --out results/news_v3_lag1_event_type_diagnostics.csv \
+            --min-n 20 \
+            --shrink-k 50 \
+            --n-boot 10000
+
+      - name: Validate diagnostics
+        run: |
+          python - <<'PY'
+          import numpy as np
+          import pandas as pd
+          p = 'results/news_v3_lag1_event_type_diagnostics.csv'
+          df = pd.read_csv(p)
+          required = {'event_type','symbol','selection','direction','n_base','n_eligible','n_selected','mean_base','mean_selected_gross','delta_mean','ci_low','ci_high','status'}
+          if not required.issubset(df.columns) or df.empty:
+              raise SystemExit('Invalid event-type diagnostic schema')
+          if not df['selection'].isin(['top25','top50']).all():
+              raise SystemExit('Invalid event-type selection')
+          if not df['direction'].isin(['normal','inverted']).all():
+              raise SystemExit('Invalid event-type direction')
+          if not df['n_selected'].ge(0).all() or not df['n_selected'].le(df['n_eligible']).all():
+              raise SystemExit('Invalid event-type counts')
+          ok = df[df['status'].eq('OK')]
+          numeric = ok[['n_base','n_eligible','n_selected','mean_base','mean_selected_gross','delta_mean','ci_low','ci_high']].apply(pd.to_numeric, errors='coerce')
+          if numeric.isna().any().any() or (ok['ci_low'] > ok['ci_high']).any():
+              raise SystemExit('Invalid event-type numeric result')
+          print('NEWS V3 LAG1 EVENT TYPE DIAGNOSTICS PASS')
+          print(df.to_string(index=False))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: news-v3-lag1-event-type-diagnostics
+          path: market_rebound_model/results/news_v3_lag1_event_type_diagnostics.csv
+          if-no-files-found: error
