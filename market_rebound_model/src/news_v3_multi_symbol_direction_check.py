@@ -28,7 +28,7 @@ def main() -> None:
 
     reports = []
     row_parts = []
-    for direction, factor in [("normal", -1.0), ("inverted", 1.0)]:
+    for direction, factor in [("normal", 1.0), ("inverted", -1.0)]:
         scored = valid.copy()
         scored["news_rank_score"] = scored["news_rank_score"] * factor
         for symbol, g in scored.groupby("symbol", sort=True):
@@ -56,7 +56,7 @@ def main() -> None:
     pivot_path = Path(args.out).with_name(Path(args.out).stem + "_pivot.csv")
     pivot.to_csv(pivot_path, index=False)
 
-    print("MULTI-SYMBOL SCORE DIRECTION")
+    print("MULTI-SYMBOL SCORE DIRECTION (RAW SCORE)")
     print(report.to_string(index=False))
     print("DIRECTION COMPARISON")
     print(pivot.to_string(index=False))
