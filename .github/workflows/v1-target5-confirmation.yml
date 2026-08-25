@@ -1,0 +1,78 @@
+name: V1 Target5 confirmation
+
+on:
+  workflow_dispatch:
+
+jobs:
+  target5-confirmation:
+    name: Walk-forward Target_5 confirmation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+
+      - name: Run Target_5 confirmation
+        run: |
+          python src/v1_target5_confirmation.py \
+            --out results/v1_target5_confirmation.csv \
+            --out-stability results/v1_target5_confirmation_stability.csv \
+            --n-boot 10000
+
+      - name: Validate Target_5 confirmation
+        run: |
+          python - <<'PY'
+          import numpy as np
+          import pandas as pd
+          p='results/v1_target5_confirmation.csv'
+          s='results/v1_target5_confirmation_stability.csv'
+          d=pd.read_csv(p)
+          st=pd.read_csv(s)
+          req={'symbol','variant','n_baseline','n_selected','mean_baseline','mean_selected_gross','mean_selected_net','delta_mean_gross','delta_ci_low','delta_ci_high','delta_mean_net','cost_bps','status'}
+          if not req.issubset(d.columns) or d.empty:
+              raise SystemExit('Invalid Target_5 confirmation schema')
+          allowed={'target_3','target_5','target_5_minus_target_3'}
+          if not set(d['variant']).issubset(allowed):
+              raise SystemExit('Unexpected Target_5 variant')
+          if (d['n_selected'] > d['n_baseline']).any():
+              raise SystemExit('Invalid Target_5 selected counts')
+          ok=d[d['status'].eq('OK')]
+          nums=['n_baseline','n_selected','mean_baseline','mean_selected_gross','mean_selected_net','delta_mean_gross','delta_ci_low','delta_ci_high','delta_mean_net','cost_bps']
+          if not ok.empty and not np.isfinite(ok[nums].to_numpy(float)).all():
+              raise SystemExit('Invalid Target_5 numeric result')
+          if not st.empty:
+              req_st={'symbol','year','variant','n_baseline','n_selected','mean_baseline','mean_selected_gross','delta_mean','status'}
+              if not req_st.issubset(st.columns):
+                  raise SystemExit('Invalid Target_5 stability schema')
+              if (st['n_selected'] > st['n_baseline']).any():
+                  raise SystemExit('Invalid Target_5 stability counts')
+              ok_st=st[st['status'].eq('OK')]
+              nums_st=['n_baseline','n_selected','mean_baseline','mean_selected_gross','delta_mean']
+              if not ok_st.empty and not np.isfinite(ok_st[nums_st].to_numpy(float)).all():
+                  raise SystemExit('Invalid Target_5 stability numeric result')
+          print('V1 TARGET5 CONFIRMATION PASS')
+          print(d.to_string(index=False))
+          print('V1 TARGET5 STABILITY PASS')
+          print(st.to_string(index=False))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v1-target5-confirmation
+          path: |
+            market_rebound_model/results/v1_target5_confirmation.csv
+            market_rebound_model/results/v1_target5_confirmation_stability.csv
+          if-no-files-found: error
