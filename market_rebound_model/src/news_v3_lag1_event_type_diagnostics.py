@@ -30,12 +30,16 @@ def score_one_event_type(rows: pd.DataFrame, raw: pd.DataFrame, event_type: str,
 
     events = _event_features_lagged(raw, 1, x[["Date", "symbol"]])
     col = f"negative_event_{event_type}_share"
-    # A type absent from the current raw sample is a legitimate zero-feature case,
-    # not a schema error. Create the column explicitly before selecting it.
     if col not in events.columns:
         events[col] = 0.0
-    events = events[["Date", "symbol", col]]
-    x = x.merge(events, on=["Date", "symbol"], how="left")
+    events = events[["Date", "symbol", col]].copy()
+
+    # rows may already contain the same feature column; drop it before merge
+    # so pandas cannot create _x/_y suffixes and hide the canonical column.
+    x = x.drop(columns=[col], errors="ignore")
+    x = x.merge(events, on=["Date", "symbol"], how="left", validate="many_to_one")
+    if col not in x.columns:
+        raise RuntimeError(f"Missing merged event feature column: {col}")
     x[col] = pd.to_numeric(x[col], errors="coerce").fillna(0.0)
 
     candidates = x[x["v1_top20"]].copy()
