@@ -1,0 +1,47 @@
+name: V1 dynamic live production check
+
+on:
+  workflow_dispatch:
+
+jobs:
+  production-check:
+    name: Execute live V1 with Discord capture
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r market_rebound_model/requirements.txt pytest
+      - name: Execute production live path without Discord send
+        working-directory: market_rebound_model/src
+        run: |
+          python - <<'PY'
+          import live_alert
+
+          captured = []
+
+          def capture(message: str) -> None:
+              captured.append(message)
+              print('CAPTURED DISCORD ALERT')
+              print(message)
+
+          live_alert.discord = capture
+          rc = live_alert.main()
+          if rc != 0:
+              raise SystemExit(f'Unexpected live_alert return code: {rc}')
+          mode = live_alert.CONFIG['signal'].get('threshold_mode')
+          if mode != 'dynamic_top10':
+              raise SystemExit(f'Unexpected threshold mode: {mode!r}')
+          quantile = float(live_alert.CONFIG['signal'].get('dynamic_top_quantile', 0.0))
+          if abs(quantile - 0.90) > 1e-12:
+              raise SystemExit(f'Unexpected dynamic quantile: {quantile}')
+          print(f'CAPTURED_ALERT_COUNT={len(captured)}')
+          print('V1 DYNAMIC LIVE PRODUCTION CHECK PASS')
+          PY
