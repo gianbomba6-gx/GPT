@@ -36,17 +36,26 @@ jobs:
 
           rome = datetime.now(ZoneInfo("Europe/Rome"))
           ny = datetime.now(ZoneInfo("America/New_York"))
-          run_scan = (rome.hour == 16 and rome.minute == 30) or (ny.hour == 15 and ny.minute == 0)
+          if rome.hour == 16 and rome.minute == 30:
+              market = "MILAN"
+          elif ny.hour == 15 and ny.minute == 0:
+              market = "US"
+          else:
+              market = ""
+          run_scan = bool(market)
           print(f"Europe/Rome={rome.isoformat()}")
           print(f"America/New_York={ny.isoformat()}")
           print(f"RUN_SCAN={str(run_scan).lower()}")
+          print(f"SCAN_MARKET={market or 'NONE'}")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
               f.write(f"run_scan={'true' if run_scan else 'false'}\n")
+              f.write(f"scan_market={market}\n")
           PY
       - name: Run rebound scanner
         if: steps.market_time.outputs.run_scan == 'true'
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          SCAN_MARKET: ${{ steps.market_time.outputs.scan_market }}
         working-directory: market_rebound_model/src
         run: python live_alert.py
       - name: Skip non-market slot
