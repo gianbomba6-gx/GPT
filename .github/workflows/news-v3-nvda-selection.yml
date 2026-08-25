@@ -7,6 +7,7 @@ on:
       - 'market_rebound_model/src/news_v3_nvda_selection_robustness.py'
       - 'market_rebound_model/src/news_v3_multi_symbol_selection_robustness.py'
       - 'market_rebound_model/src/news_v3_multi_symbol_direction_check.py'
+      - 'market_rebound_model/src/news_v3_symbol_direction_calibrator.py'
       - 'market_rebound_model/tests/test_news_v3_nvda_selection_bootstrap.py'
       - 'market_rebound_model/tests/test_news_v3_nvda_selection_robustness.py'
       - 'market_rebound_model/tests/test_news_v3_multi_symbol_selection_robustness.py'
@@ -94,6 +95,15 @@ jobs:
             --n-boot 10000 \
             --min-history 20 \
             --cost-bps 20
+      - name: Run prospective per-symbol direction calibration
+        run: |
+          python src/news_v3_symbol_direction_calibrator.py \
+            results/news_v3_secondary_ranking_inverted_rows.csv \
+            --out results/news_v3_symbol_direction_calibration.csv \
+            --out-rows results/news_v3_symbol_direction_calibration_rows.csv \
+            --n-boot 10000 \
+            --min-history 20 \
+            --min-calibration 8
       - name: Validate
         run: |
           python - <<'PY'
@@ -157,19 +167,25 @@ jobs:
               if not all(np.isfinite(vals)):
                   raise SystemExit('Non-finite score direction comparison')
 
-          print('NVDA NEWS SELECTION PASS')
-          print(r.to_string(index=False))
-          print('NVDA PROSPECTIVE ROBUSTNESS PASS')
-          print(rr.to_string(index=False))
-          print('NVDA TOP50 STABILITY')
-          print(stability.to_string(index=False))
-          print('MULTI-SYMBOL PROSPECTIVE ROBUSTNESS PASS')
-          print(ms.to_string(index=False))
+          cal = pd.read_csv('results/news_v3_symbol_direction_calibration.csv')
+          required_cal = {'symbol','selection','n_total','n_eligible','n_selected','delta_mean','ci_low','ci_high','normal_count','inverted_count'}
+          if not required_cal.issubset(cal.columns):
+              raise SystemExit('Invalid symbol direction calibration schema')
+          if len(cal) == 0:
+              raise SystemExit('Empty symbol direction calibration')
+          for _, row in cal.iterrows():
+              vals = [row.n_total, row.n_eligible, row.n_selected, row.delta_mean, row.ci_low, row.ci_high, row.normal_count, row.inverted_count]
+              if not all(np.isfinite(vals)):
+                  raise SystemExit('Non-finite symbol direction calibration')
+              if row.n_eligible <= 0 or row.n_selected <= 0 or row.n_selected > row.n_eligible:
+                  raise SystemExit('Invalid symbol direction calibration counts')
+              if row.ci_low > row.ci_high:
+                  raise SystemExit('Invalid symbol direction calibration CI ordering')
+
+          print('SYMBOL DIRECTION CALIBRATION PASS')
+          print(cal.to_string(index=False))
           print('SCORE DIRECTION COMPARISON')
           print(dc.to_string(index=False))
-          coverage = pd.read_csv('results/news_v3_multi_symbol_selection_robustness_coverage.csv')
-          print('MULTI-SYMBOL COVERAGE')
-          print(coverage.to_string(index=False))
           PY
       - uses: actions/upload-artifact@v4
         with:
@@ -186,4 +202,6 @@ jobs:
             market_rebound_model/results/news_v3_multi_symbol_direction_check.csv
             market_rebound_model/results/news_v3_multi_symbol_direction_check_pivot.csv
             market_rebound_model/results/news_v3_multi_symbol_direction_rows.csv
+            market_rebound_model/results/news_v3_symbol_direction_calibration.csv
+            market_rebound_model/results/news_v3_symbol_direction_calibration_rows.csv
           if-no-files-found: error
