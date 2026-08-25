@@ -29,6 +29,59 @@ MIN_N = 20
 SHRINK_K = 50.0
 
 
+def _event_features_lagged(raw: pd.DataFrame, lag_days: int) -> pd.DataFrame:
+    """Build event shares for a future candidate day using prior calendar-day news.
+
+    For lagged mode we deliberately include all news on the source day, including
+    items published after that day's market close, because those items are
+    available before the following trading session. The resulting feature day is
+    source candidate_day + lag_days.
+    """
+    if lag_days <= 0:
+        return _event_features(raw)
+    required = {"published_at", "symbol", "candidate_day"}
+    missing = required - set(raw.columns)
+    if missing:
+        raise ValueError(f"Missing raw columns: {sorted(missing)}")
+    x = raw.copy()
+    x["symbol"] = x["symbol"].astype(str).str.upper().str.strip()
+    x["published_at"] = pd.to_datetime(x["published_at"], utc=True, errors="coerce")
+    x["candidate_day"] = pd.to_datetime(x["candidate_day"], errors="coerce").dt.normalize()
+    x = x.dropna(subset=["published_at", "candidate_day", "symbol"]).copy()
+    if x.empty:
+        return pd.DataFrame(columns=["Date", "symbol", "news_count", *[f"event_{e}_share" for e in EVENT_TYPES], *[f"negative_event_{e}_share" for e in EVENT_TYPES]])
+    x = add_event_features_safe(x)
+    x["feature_day"] = x["candidate_day"] + pd.to_timedelta(lag_days, unit="D")
+    keys = ["feature_day", "symbol"]
+    base = x.groupby(keys, as_index=False).agg(news_count=("event_type", "size"))
+    counts = pd.crosstab([x["feature_day"], x["symbol"]], x["event_type"]).reset_index()
+    counts = counts.rename(columns={c: f"event_{c}_count" for c in counts.columns if c not in keys})
+    neg = x[x["is_negative_event"] == 1]
+    neg_counts = pd.crosstab([neg["feature_day"], neg["symbol"]], neg["event_type"]).reset_index()
+    neg_counts = neg_counts.rename(columns={c: f"negative_event_{c}_count" for c in neg_counts.columns if c not in keys})
+    out = base.merge(counts, on=keys, how="left").merge(neg_counts, on=keys, how="left")
+    for event in EVENT_TYPES:
+        ec, nc = f"event_{event}_count", f"negative_event_{event}_count"
+        if ec not in out:
+            out[ec] = 0
+        if nc not in out:
+            out[nc] = 0
+        out[ec] = pd.to_numeric(out[ec], errors="coerce").fillna(0)
+        out[nc] = pd.to_numeric(out[nc], errors="coerce").fillna(0)
+        out[f"event_{event}_share"] = out[ec] / out["news_count"].clip(lower=1)
+        out[f"negative_event_{event}_share"] = out[nc] / out["news_count"].clip(lower=1)
+    return out.rename(columns={"feature_day": "Date"})
+
+
+def add_event_features_safe(x: pd.DataFrame) -> pd.DataFrame:
+    """Import classifier features without changing its module API."""
+    try:
+        from .news_event_classifier import add_event_features
+    except ImportError:
+        from news_event_classifier import add_event_features
+    return add_event_features(x)
+
+
 def _event_score_rules(
     event_history: pd.DataFrame,
     baseline_history: pd.DataFrame,
@@ -66,6 +119,7 @@ def score_oos(
     min_n: int = MIN_N,
     shrink_k: float = SHRINK_K,
     invert_score: bool = False,
+    event_lag_days: int = 0,
 ) -> pd.DataFrame:
     required = {"Date", "symbol", "next_ret", "v1_top20"}
     missing = required - set(rows.columns)
@@ -80,7 +134,7 @@ def score_oos(
     x = x.dropna(subset=["Date", "symbol"]).sort_values(["Date", "symbol"]).reset_index(drop=True)
 
     if raw is not None:
-        events = _event_features(raw)
+        events = _event_features_lagged(raw, event_lag_days)
         event_cols = ["Date", "symbol", *[f"negative_event_{e}_share" for e in EVENT_TYPES]]
         events = events[[c for c in event_cols if c in events.columns]]
         x = x.drop(columns=[c for c in event_cols if c not in {"Date", "symbol"}], errors="ignore")
@@ -179,10 +233,18 @@ def main() -> None:
     ap.add_argument("--min-n", type=int, default=MIN_N)
     ap.add_argument("--shrink-k", type=float, default=SHRINK_K)
     ap.add_argument("--invert-score", action="store_true")
+    ap.add_argument("--event-lag-days", type=int, default=0, choices=[0, 1])
     args = ap.parse_args()
     rows = pd.read_csv(args.rows_csv)
     raw = pd.read_csv(args.raw_gkg) if args.raw_gkg else None
-    scored = score_oos(rows, raw=raw, min_n=args.min_n, shrink_k=args.shrink_k, invert_score=args.invert_score)
+    scored = score_oos(
+        rows,
+        raw=raw,
+        min_n=args.min_n,
+        shrink_k=args.shrink_k,
+        invert_score=args.invert_score,
+        event_lag_days=args.event_lag_days,
+    )
     if scored.empty:
         raise SystemExit("No V1 top20 rows available for secondary news ranking")
     report, quartiles = build_report(scored)
@@ -193,6 +255,7 @@ def main() -> None:
     quartiles.to_csv(p.with_name(stem + "_quartiles.csv"), index=False)
     scored.to_csv(p.with_name(stem + "_rows.csv"), index=False)
     print("INVERTED_SCORE=" + str(args.invert_score))
+    print("EVENT_LAG_DAYS=" + str(args.event_lag_days))
     print("SYMBOL REPORT")
     print(report.to_string(index=False))
     print("SCORE QUARTILES")
