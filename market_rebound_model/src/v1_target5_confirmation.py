@@ -25,9 +25,9 @@ COST = 0.002  # 20 bps
 SEED = 42
 
 
-def fit_model(train: pd.DataFrame, features_target: str) -> tuple[HistGradientBoostingClassifier | None, pd.DataFrame]:
-    tr = train.dropna(subset=FEATURES + [features_target]).copy()
-    if len(tr) < 500 or tr[features_target].nunique() < 2:
+def fit_model(train: pd.DataFrame, target: str) -> tuple[HistGradientBoostingClassifier | None, pd.DataFrame]:
+    tr = train.dropna(subset=FEATURES + [target]).copy()
+    if len(tr) < 500 or tr[target].nunique() < 2:
         return None, tr
     model = HistGradientBoostingClassifier(
         max_iter=250,
@@ -36,7 +36,7 @@ def fit_model(train: pd.DataFrame, features_target: str) -> tuple[HistGradientBo
         l2_regularization=2,
         random_state=SEED,
     )
-    model.fit(tr[FEATURES], tr[features_target].astype(int))
+    model.fit(tr[FEATURES], tr[target].astype(int))
     return model, tr
 
 
@@ -52,38 +52,42 @@ def training_threshold(train: pd.DataFrame, target: str) -> float:
 
 
 def walk_forward(data: pd.DataFrame) -> pd.DataFrame:
-    parts: list[pd.DataFrame] = []
+    yearly_parts: list[pd.DataFrame] = []
     for year in sorted(data["Date"].dt.year.unique()):
         train = data[data["Date"].dt.year < year].copy()
         test = data[data["Date"].dt.year == year].copy()
         if len(train) < 500 or test.empty:
             continue
-        test = test.copy()
+
+        test = test.dropna(subset=["Date", "symbol"]).copy()
         test["baseline_signal"] = test["ret"] <= -0.02
+        test["year"] = int(year)
+        test["score_target_3"] = np.nan
+        test["score_target_5"] = np.nan
+        test["selected_target_3"] = False
+        test["selected_target_5"] = False
+
+        te = test.dropna(subset=FEATURES).copy()
+        if te.empty:
+            continue
+
         for target in VARIANTS:
             model, _ = fit_model(train, target)
-            if model is None:
-                continue
             thr = training_threshold(train, target)
-            if not np.isfinite(thr):
+            if model is None or not np.isfinite(thr):
                 continue
-            te = test.dropna(subset=FEATURES).copy()
-            if te.empty:
-                continue
-            te[f"score_{target}"] = model.predict_proba(te[FEATURES])[:, 1]
-            te[f"selected_{target}"] = te["baseline_signal"] & (te[f"score_{target}"] >= thr)
-            cols = ["Date", "symbol", "ret", "next_ret", "baseline_signal", f"score_{target}", f"selected_{target}"]
-            piece = te[cols].copy()
-            piece["year"] = year
-            parts.append(piece)
-    if not parts:
+            score = model.predict_proba(te[FEATURES])[:, 1]
+            test.loc[te.index, f"score_{target}"] = score
+            test.loc[te.index, f"selected_{target}"] = te["baseline_signal"].to_numpy(bool) & (score >= thr)
+
+        yearly_parts.append(test[[
+            "Date", "symbol", "ret", "next_ret", "baseline_signal", "year",
+            "score_target_3", "selected_target_3", "score_target_5", "selected_target_5"
+        ]].copy())
+
+    if not yearly_parts:
         return pd.DataFrame()
-    # Merge the per-target OOS decisions on the same test observations.
-    out = parts[0]
-    for p in parts[1:]:
-        keep = ["Date", "symbol", "ret", "next_ret", "baseline_signal", "year", f"score_{p.columns[-2].removeprefix('selected_')}", p.columns[-1]]
-        out = out.merge(p[keep], on=["Date", "symbol", "ret", "next_ret", "baseline_signal", "year"], how="outer")
-    return out.sort_values(["symbol", "Date"]).reset_index(drop=True)
+    return pd.concat(yearly_parts, ignore_index=True).sort_values(["symbol", "Date"]).reset_index(drop=True)
 
 
 def bootstrap_delta(values: np.ndarray, selected: np.ndarray, n_boot: int) -> tuple[float, float, float]:
@@ -100,8 +104,35 @@ def bootstrap_delta(values: np.ndarray, selected: np.ndarray, n_boot: int) -> tu
     counts = masks.sum(axis=1)
     valid_boot = counts > 0
     deltas = np.full(n_boot, np.nan, dtype=float)
-    deltas[valid_boot] = (sample * masks).sum(axis=1)[valid_boot] / counts[valid_boot] - sample.mean(axis=1)[valid_boot]
+    deltas[valid_boot] = (
+        (sample * masks).sum(axis=1)[valid_boot] / counts[valid_boot]
+        - sample.mean(axis=1)[valid_boot]
+    )
     ci = np.nanpercentile(deltas, [2.5, 97.5])
+    return observed, float(ci[0]), float(ci[1])
+
+
+def bootstrap_variant_difference(values: np.ndarray, sel_a: np.ndarray, sel_b: np.ndarray, n_boot: int) -> tuple[float, float, float]:
+    valid = np.isfinite(values)
+    values = values[valid]
+    sel_a = sel_a[valid]
+    sel_b = sel_b[valid]
+    if len(values) == 0 or sel_a.sum() == 0 or sel_b.sum() == 0:
+        return float("nan"), float("nan"), float("nan")
+    observed = float(values[sel_b].mean() - values[sel_a].mean())
+    rng = np.random.default_rng(SEED + 1)
+    idx = rng.integers(0, len(values), size=(n_boot, len(values)))
+    sample = values[idx]
+    a = sel_a[idx]
+    b = sel_b[idx]
+    ca, cb = a.sum(axis=1), b.sum(axis=1)
+    valid_boot = (ca > 0) & (cb > 0)
+    diffs = np.full(n_boot, np.nan, dtype=float)
+    diffs[valid_boot] = (
+        (sample * b).sum(axis=1)[valid_boot] / cb[valid_boot]
+        - (sample * a).sum(axis=1)[valid_boot] / ca[valid_boot]
+    )
+    ci = np.nanpercentile(diffs, [2.5, 97.5])
     return observed, float(ci[0]), float(ci[1])
 
 
@@ -113,11 +144,10 @@ def summarize(df: pd.DataFrame, n_boot: int) -> tuple[pd.DataFrame, pd.DataFrame
         if x.empty:
             continue
         base_mean = float(x["next_ret"].mean())
+        sel_masks = {}
         for target in VARIANTS:
-            col = f"selected_{target}"
-            if col not in x.columns:
-                continue
-            sel = x[col].fillna(False).astype(bool).to_numpy()
+            sel = x[f"selected_{target}"].fillna(False).astype(bool).to_numpy()
+            sel_masks[target] = sel
             vals = x["next_ret"].to_numpy(float)
             delta, lo, hi = bootstrap_delta(vals, sel, n_boot)
             n_sel = int(sel.sum())
@@ -137,6 +167,22 @@ def summarize(df: pd.DataFrame, n_boot: int) -> tuple[pd.DataFrame, pd.DataFrame
                 "cost_bps": 20.0,
                 "status": "OK" if n_sel else "NO_SELECTED_CASES",
             })
+        d53, d53lo, d53hi = bootstrap_variant_difference(vals, sel_masks["target_3"], sel_masks["target_5"], n_boot)
+        rows.append({
+            "symbol": symbol,
+            "variant": "target_5_minus_target_3",
+            "n_baseline": len(x),
+            "n_selected": int(sel_masks["target_5"].sum()),
+            "mean_baseline": base_mean,
+            "mean_selected_gross": float(vals[sel_masks["target_5"]].mean()) if sel_masks["target_5"].any() else float("nan"),
+            "mean_selected_net": float(vals[sel_masks["target_5"]].mean() - COST) if sel_masks["target_5"].any() else float("nan"),
+            "delta_mean_gross": d53,
+            "delta_ci_low": d53lo,
+            "delta_ci_high": d53hi,
+            "delta_mean_net": d53 - 0.0 if np.isfinite(d53) else float("nan"),
+            "cost_bps": 0.0,
+            "status": "OK" if np.isfinite(d53) else "INSUFFICIENT_OVERLAP",
+        })
     report = pd.DataFrame(rows)
 
     stab = []
@@ -203,7 +249,10 @@ def main() -> None:
     report, stability = summarize(scored, args.n_boot)
     if report.empty:
         raise RuntimeError("No confirmation summary generated")
-    numeric = ["n_baseline", "n_selected", "mean_baseline", "mean_selected_gross", "mean_selected_net", "delta_mean_gross", "delta_ci_low", "delta_ci_high", "delta_mean_net", "cost_bps"]
+    numeric = [
+        "n_baseline", "n_selected", "mean_baseline", "mean_selected_gross", "mean_selected_net",
+        "delta_mean_gross", "delta_ci_low", "delta_ci_high", "delta_mean_net", "cost_bps"
+    ]
     ok = report[report["status"].eq("OK")]
     if not ok.empty and not np.isfinite(ok[numeric].to_numpy(float)).all():
         raise SystemExit("Invalid Target_5 confirmation result")
