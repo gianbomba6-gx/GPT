@@ -3,9 +3,14 @@ name: Daily rebound scan
 on:
   workflow_dispatch:
   schedule:
-    # 23:30 Europe/Rome: 21:30 UTC in summer, 22:30 UTC in winter.
-    # GitHub Actions cron is UTC, so run at 21:30 UTC; this is 23:30 CEST.
-    - cron: '30 21 * * 1-5'
+    # GitHub Actions cron is UTC. We trigger all possible DST slots and
+    # execute the scanner only when the local market-clock check matches.
+    # Milan: 16:30 Europe/Rome (one hour before 17:30 close).
+    # US:    15:00 America/New_York (one hour before 16:00 ET close).
+    - cron: '30 14 * * 1-5'
+    - cron: '30 15 * * 1-5'
+    - cron: '0 19 * * 1-5'
+    - cron: '0 20 * * 1-5'
 
 jobs:
   scan:
@@ -21,8 +26,29 @@ jobs:
           python-version: '3.12'
       - name: Install dependencies
         run: pip install -r market_rebound_model/requirements.txt
+      - name: Check market-local trigger time
+        id: market_time
+        run: |
+          python - <<'PY'
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          import os
+
+          rome = datetime.now(ZoneInfo("Europe/Rome"))
+          ny = datetime.now(ZoneInfo("America/New_York"))
+          run_scan = (rome.hour == 16 and rome.minute == 30) or (ny.hour == 15 and ny.minute == 0)
+          print(f"Europe/Rome={rome.isoformat()}")
+          print(f"America/New_York={ny.isoformat()}")
+          print(f"RUN_SCAN={str(run_scan).lower()}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write(f"run_scan={'true' if run_scan else 'false'}\n")
+          PY
       - name: Run rebound scanner
+        if: steps.market_time.outputs.run_scan == 'true'
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         working-directory: market_rebound_model/src
         run: python live_alert.py
+      - name: Skip non-market slot
+        if: steps.market_time.outputs.run_scan != 'true'
+        run: echo "Cron slot not aligned with a market-close-minus-one-hour trigger; no scan executed."
