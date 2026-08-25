@@ -5,6 +5,7 @@ on:
     paths:
       - 'market_rebound_model/src/news_event_secondary_ranking.py'
       - 'market_rebound_model/src/news_v3_incremental_value.py'
+      - 'market_rebound_model/src/news_v3_lag1_stability.py'
       - 'market_rebound_model/tests/test_news_event_secondary_ranking.py'
       - '.github/workflows/news-v3-lag1-incremental.yml'
   workflow_dispatch:
@@ -157,6 +158,30 @@ jobs:
           print(iv.to_string(index=False))
           PY
 
+      - name: Run lag1 annual stability
+        run: |
+          python src/news_v3_lag1_stability.py \
+            results/news_v3_lag1_incremental_value_rows.csv \
+            --out results/news_v3_lag1_stability.csv
+
+      - name: Validate lag1 annual stability
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          st = pd.read_csv('results/news_v3_lag1_stability.csv')
+          required = {'symbol','year','filter','n_base','n_eligible','n_selected','mean_base','mean_selected_gross','delta_mean','status'}
+          if not required.issubset(st.columns) or st.empty:
+              raise SystemExit('Invalid lag1 stability schema')
+          if not st['filter'].isin(['news_top25','news_top50']).all():
+              raise SystemExit('Invalid lag1 stability filter')
+          if not st['n_selected'].ge(0).all() or not st['n_selected'].le(st['n_eligible']).all():
+              raise SystemExit('Invalid lag1 stability counts')
+          if st['status'].eq('OK').any() and not st.loc[st['status'].eq('OK'), ['mean_base','mean_selected_gross','delta_mean']].applymap(lambda v: pd.notna(v) and pd.api.types.is_number(v)).all().all():
+              raise SystemExit('Invalid lag1 stability values')
+          print('NEWS V3 LAG1 STABILITY PASS')
+          print(st.to_string(index=False))
+          PY
+
       - uses: actions/upload-artifact@v4
         with:
           name: news-v3-lag1-prior-day-test
@@ -169,4 +194,5 @@ jobs:
             market_rebound_model/results/news_v3_secondary_ranking_lag1_inverted_rows.csv
             market_rebound_model/results/news_v3_lag1_incremental_value.csv
             market_rebound_model/results/news_v3_lag1_incremental_value_rows.csv
+            market_rebound_model/results/news_v3_lag1_stability.csv
           if-no-files-found: error
