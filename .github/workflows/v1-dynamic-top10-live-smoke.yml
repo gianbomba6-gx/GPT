@@ -1,0 +1,53 @@
+name: V1 dynamic top10 live smoke
+
+on:
+  workflow_dispatch:
+
+jobs:
+  live-smoke:
+    name: Dynamic top10 live smoke test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt pytest
+      - name: Run dynamic top10 live smoke
+        run: |
+          python src/v1_dynamic_top10_live_smoke.py \
+            --out results/v1_dynamic_top10_live_smoke.csv
+      - name: Validate dynamic top10 live smoke
+        run: |
+          python - <<'PY'
+          import numpy as np
+          import pandas as pd
+          p='results/v1_dynamic_top10_live_smoke.csv'
+          d=pd.read_csv(p)
+          req={'symbol','date','ret','probability','dynamic_cutoff','gate_down_2pct','qualifies_dynamic_top10'}
+          if not req.issubset(d.columns) or d.empty:
+              raise SystemExit('Invalid dynamic live smoke schema')
+          nums=['ret','probability','dynamic_cutoff']
+          if not np.isfinite(d[nums].to_numpy(float)).all():
+              raise SystemExit('Invalid dynamic live smoke values')
+          if d.dynamic_cutoff.nunique()!=1:
+              raise SystemExit('Dynamic cutoff is not unique')
+          if not ((d.probability >= 0) & (d.probability <= 1)).all():
+              raise SystemExit('Invalid probability range')
+          expected = d.gate_down_2pct & (d.probability >= d.dynamic_cutoff)
+          if not expected.equals(d.qualifies_dynamic_top10.astype(bool)):
+              raise SystemExit('Dynamic qualification logic mismatch')
+          print('V1 DYNAMIC TOP10 LIVE SMOKE PASS')
+          print(d.to_string(index=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v1-dynamic-top10-live-smoke
+          path: market_rebound_model/results/v1_dynamic_top10_live_smoke.csv
+          if-no-files-found: error
