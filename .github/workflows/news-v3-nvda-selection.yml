@@ -148,12 +148,12 @@ jobs:
               if not all(np.isfinite(vals)) or row.n_eligible <= 0 or row.n_selected <= 0 or row.n_selected > row.n_eligible or row.ci_low > row.ci_high:
                   raise SystemExit('Invalid direction benchmark result')
           iv = pd.read_csv('results/news_v3_incremental_value.csv')
-          required_iv = {'set','n_base','n_selected','mean_base','mean_selected_gross','mean_selected_net','delta_mean','ci_low','ci_high','cost_bps'}
+          required_iv = {'set','n_base','n_news_candidates','n_eligible','n_selected','mean_base','mean_selected_gross','mean_selected_net','delta_mean','ci_low','ci_high','cost_bps','status'}
           if not required_iv.issubset(iv.columns) or iv.empty:
               raise SystemExit('Invalid incremental value schema')
           for _, row in iv.iterrows():
-              vals = [row.n_base, row.n_selected, row.mean_base, row.delta_mean, row.ci_low, row.ci_high, row.mean_selected_gross, row.mean_selected_net, row.cost_bps]
-              if not all(np.isfinite(vals)) or row.n_base <= 0 or row.n_selected < 0 or row.n_selected > row.n_base or row.ci_low > row.ci_high:
+              vals = [row.n_base, row.n_news_candidates, row.n_eligible, row.n_selected, row.mean_base, row.delta_mean, row.ci_low, row.ci_high, row.mean_selected_gross, row.mean_selected_net, row.cost_bps]
+              if not all(np.isfinite(vals)) or row.n_base <= 0 or row.n_news_candidates < 0 or row.n_eligible < 0 or row.n_selected < 0 or row.n_selected > row.n_eligible or row.n_news_candidates > row.n_base or row.ci_low > row.ci_high:
                   raise SystemExit('Invalid incremental value result')
           print('DIRECTION STRATEGY BENCHMARK PASS')
           print(benchmark.to_string(index=False))
