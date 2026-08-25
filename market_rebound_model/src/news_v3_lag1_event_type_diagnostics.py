@@ -6,11 +6,18 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.news_event_secondary_ranking import (
-    EVENT_TYPES,
-    _event_features_lagged,
-    _event_score_rules,
-)
+try:
+    from .news_event_secondary_ranking import (
+        EVENT_TYPES,
+        _event_features_lagged,
+        _event_score_rules,
+    )
+except ImportError:
+    from news_event_secondary_ranking import (
+        EVENT_TYPES,
+        _event_features_lagged,
+        _event_score_rules,
+    )
 
 
 def score_one_event_type(rows: pd.DataFrame, raw: pd.DataFrame, event_type: str, min_n: int, shrink_k: float) -> pd.DataFrame:
