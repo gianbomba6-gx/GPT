@@ -1,10 +1,4 @@
-"""Daily Yahoo Finance rebound scanner with Discord heartbeat/status reports.
-
-The live scanner uses a pooled cross-ticker expanding-window model and adds
-Euro Stoxx 50 market-regime features. The production threshold can be fixed
-(legacy) or derived dynamically as the training 90th percentile of model
-probabilities among rebound candidates.
-"""
+"""Daily Yahoo Finance rebound scanner with Discord heartbeat/status reports."""
 from __future__ import annotations
 
 import json
@@ -24,13 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG = json.loads((ROOT / "config" / "tickers.json").read_text())
 TARGET = "target_3"
 REGIME_FEATURES = [
-    "mkt_ret",
-    "mkt_ret_5",
-    "mkt_ret_20",
-    "mkt_vol_20",
-    "rel_ret_1",
-    "rel_ret_5",
-    "rel_ret_20",
+    "mkt_ret", "mkt_ret_5", "mkt_ret_20", "mkt_vol_20",
+    "rel_ret_1", "rel_ret_5", "rel_ret_20",
 ]
 FEATURES = BASE_FEATURES + REGIME_FEATURES
 SEED = 42
@@ -129,14 +118,15 @@ def main() -> int:
     frames: dict[str, pd.DataFrame] = {}
     benchmark_symbol = next(x["symbol"] for x in CONFIG["tickers"] if x["type"] == "benchmark")
     scan_market = os.environ.get("SCAN_MARKET", "AUTO").strip().upper()
-    now_rome = datetime.now(ZoneInfo("Europe/Rome"))
-    now_ny = datetime.now(ZoneInfo("America/New_York"))
     if scan_market == "MILAN":
         market_label = "🇮🇹 MILANO"
+        report_now = datetime.now(ZoneInfo("Europe/Rome"))
     elif scan_market == "US":
         market_label = "🇺🇸 USA"
+        report_now = datetime.now(ZoneInfo("America/New_York"))
     else:
         market_label = "🌐 MARKET"
+        report_now = datetime.now(ZoneInfo("Europe/Rome"))
 
     for item in CONFIG["tickers"]:
         symbol = item["symbol"]
@@ -156,20 +146,14 @@ def main() -> int:
         raise RuntimeError(f"No benchmark data for {benchmark_symbol}")
 
     frames = add_market_regime(frames, benchmark)
-    rows = []
-    for symbol, d in frames.items():
-        z = d.copy()
-        z["symbol"] = symbol
-        rows.append(z)
-    all_data = pd.concat(rows, ignore_index=True)
+    all_data = pd.concat([d.assign(symbol=s) for s, d in frames.items()], ignore_index=True)
     all_data["Date"] = pd.to_datetime(all_data["Date"], errors="coerce").dt.normalize()
 
-    model, trainable, train, latest_year = fit_pooled_model(all_data)
+    model, _, train, latest_year = fit_pooled_model(all_data)
     threshold, threshold_mode, n_candidates = resolve_threshold(model, train)
     print(
-        f"THRESHOLD mode={threshold_mode} value={threshold:.6f} "
-        f"latest_year={latest_year} train_rows={len(train)}"
-        + (f" train_rebound_candidates={n_candidates}" if n_candidates is not None else "")
+        f"THRESHOLD mode={threshold_mode} value={threshold:.6f} latest_year={latest_year} "
+        f"train_rows={len(train)} train_rebound_candidates={n_candidates}"
     )
 
     latest_by_symbol = {symbol: d.sort_values("Date").iloc[-1].copy() for symbol, d in frames.items()}
@@ -194,13 +178,10 @@ def main() -> int:
         ret = float(latest["ret"])
         qualifies = ret <= down_threshold and probability >= threshold
         state = "🚨 SEGNALE" if qualifies else "✅ OK"
-        status_lines.append(
-            f"{state} **{symbol}** — ret {ret:.2%}, P {probability:.1%}"
-        )
+        status_lines.append(f"{state} **{symbol}** — ret {ret:.2%}, P {probability:.1%}")
         print(
-            f"CHECK {symbol}: date={latest['Date'].date()} ret={ret:.2%} "
-            f"model_p={probability:.1%} threshold={threshold:.1%} "
-            f"mkt_1d={latest['mkt_ret']:.2%} rel_1d={latest['rel_ret_1']:.2%}"
+            f"CHECK {symbol}: date={latest['Date'].date()} ret={ret:.2%} model_p={probability:.1%} "
+            f"threshold={threshold:.1%} mkt_1d={latest['mkt_ret']:.2%} rel_1d={latest['rel_ret_1']:.2%}"
         )
         if qualifies:
             alerts.append(
@@ -214,12 +195,8 @@ def main() -> int:
                 f"Market 1d: {latest['mkt_ret']:.2%} | Relative: {latest['rel_ret_1']:.2%}"
             )
 
-    timestamp = now_rome.strftime("%Y-%m-%d %H:%M %Z")
-    header = (
-        f"**V1 DAILY CHECK — {market_label}**\n"
-        f"Ora controllo: {timestamp}\n"
-        f"Threshold: **{threshold:.1%}** ({threshold_mode})"
-    )
+    timestamp = report_now.strftime("%Y-%m-%d %H:%M %Z")
+    header = f"**V1 DAILY CHECK — {market_label}**\nOra controllo: {timestamp}\nThreshold: **{threshold:.1%}** ({threshold_mode})"
     if alerts:
         message = header + "\n\n" + "\n".join(status_lines) + "\n\n" + "\n\n".join(alerts)
     else:
