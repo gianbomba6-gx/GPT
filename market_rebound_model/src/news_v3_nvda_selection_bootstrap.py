@@ -8,17 +8,14 @@ import pandas as pd
 
 
 def _rank_subset(s: pd.DataFrame, frac: float) -> pd.DataFrame:
-    s = s.sort_values(["Date", "news_rank_score"], ascending=[True, False]).copy()
-    # Select the top fraction within each day. A day with one candidate
-    # selects that candidate; otherwise at least one candidate is selected.
-    keep = np.zeros(len(s), dtype=bool)
-    for _, idx in s.groupby("Date", sort=False).groups.items():
-        positions = list(idx)
-        n = len(positions)
-        k = max(1, int(np.ceil(n * frac)))
-        top_idx = positions[:k]
-        keep[s.index.get_indexer(top_idx)] = True
-    out = s.copy()
+    """Select the top fraction of the full OOS sample by news rank score."""
+    if not 0 < frac <= 1:
+        raise ValueError("frac must be in (0, 1]")
+    out = s.sort_values(["news_rank_score", "Date"], ascending=[False, True]).copy()
+    n = len(out)
+    k = max(1, int(np.ceil(n * frac)))
+    keep = np.zeros(n, dtype=bool)
+    keep[:k] = True
     out["selected"] = keep
     return out
 
