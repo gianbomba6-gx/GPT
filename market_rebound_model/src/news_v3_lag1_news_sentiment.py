@@ -76,22 +76,28 @@ def evaluate(base: pd.DataFrame, bucket_rows: pd.DataFrame, n_boot: int) -> dict
     bucket_rows = bucket_rows[bucket_rows["next_ret"].notna()].copy()
     if bucket_rows.empty:
         return {
-            "n_base": len(base),
-            "n_bucket": 0,
+            "n_base": len(base), "n_bucket": 0,
             "mean_base": float(base["next_ret"].mean()) if len(base) else 0.0,
-            "mean_bucket": 0.0,
-            "delta_mean": 0.0,
-            "ci_low": 0.0,
-            "ci_high": 0.0,
+            "mean_bucket": 0.0, "delta_mean": 0.0, "ci_low": 0.0, "ci_high": 0.0,
             "status": "NO_BUCKET_CASES",
         }
     ids = set(bucket_rows["_row_id"].to_numpy())
     mask = np.array([rid in ids for rid in base["_row_id"].to_numpy()], dtype=bool)
     if not mask.any():
-        return {"n_base": len(base), "n_bucket": len(bucket_rows), "mean_base": float(base["next_ret"].mean()), "mean_bucket": np.nan, "delta_mean": np.nan, "ci_low": np.nan, "ci_high": np.nan, "status": "INVALID_SENTIMENT_ID_ALIGNMENT"}
+        return {
+            "n_base": len(base), "n_bucket": len(bucket_rows),
+            "mean_base": float(base["next_ret"].mean()), "mean_bucket": np.nan,
+            "delta_mean": np.nan, "ci_low": np.nan, "ci_high": np.nan,
+            "status": "INVALID_SENTIMENT_ID_ALIGNMENT",
+        }
     values = base["next_ret"].to_numpy(float)
     delta, lo, hi = bootstrap_delta(values, mask, n_boot, 42)
-    return {"n_base": len(base), "n_bucket": int(mask.sum()), "mean_base": float(values.mean()), "mean_bucket": float(values[mask].mean()), "delta_mean": float(delta), "ci_low": float(lo), "ci_high": float(hi), "status": "OK"}
+    return {
+        "n_base": len(base), "n_bucket": int(mask.sum()),
+        "mean_base": float(values.mean()), "mean_bucket": float(values[mask].mean()),
+        "delta_mean": float(delta), "ci_low": float(lo), "ci_high": float(hi),
+        "status": "OK",
+    }
 
 
 def main() -> None:
@@ -116,12 +122,15 @@ def main() -> None:
     base["_row_id"] = np.arange(len(base))
 
     sentiment = map_lag1_daily_sentiment(raw, base[["Date", "symbol"]])
+    base_for_merge = base.drop(columns=["news_count", "event_polarity"], errors="ignore")
     if not sentiment.empty:
-        x = base.merge(sentiment, on=["Date", "symbol"], how="left", validate="many_to_one")
+        x = base_for_merge.merge(sentiment, on=["Date", "symbol"], how="left", validate="many_to_one")
     else:
-        x = base.copy()
+        x = base_for_merge.copy()
         x["news_count"] = 0
         x["event_polarity"] = 0.0
+    if "event_polarity" not in x.columns or "news_count" not in x.columns:
+        raise SystemExit("Lag1 sentiment feature merge missing required columns")
     x["news_count"] = pd.to_numeric(x["news_count"], errors="coerce").fillna(0).astype(int)
     x["event_polarity"] = pd.to_numeric(x["event_polarity"], errors="coerce").fillna(0.0)
     x["sentiment_bucket"] = [sentiment_bucket(n, p) for n, p in zip(x["news_count"], x["event_polarity"])]
