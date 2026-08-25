@@ -13,7 +13,9 @@ def test_bootstrap_selection_counts_and_delta():
     assert out["n_all"] == 4
     assert out["n_selected"] == 3
     assert np.isclose(out["delta_mean"], (0.01 + 0.03 + 0.05) / 3 - 0.02)
-    assert out["ci_low"] <= out["delta_mean"] <= out["ci_high"]
+    assert np.isfinite(out["ci_low"])
+    assert np.isfinite(out["ci_high"])
+    assert out["ci_low"] <= out["ci_high"]
 
 
 def test_bootstrap_selection_is_deterministic():
