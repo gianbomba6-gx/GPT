@@ -3,13 +3,13 @@
 Does not modify live production code. Rebuilds the same pooled target_3 model
 used by live_alert, derives the 90th-percentile probability cutoff from prior
 training rebound candidates, and applies it to the latest available row per
-symbol. Validates feature completeness, gate behavior, finite values and
-current dynamic cutoff.
+symbol. Uses one batched Yahoo download to reduce rate-limit risk.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -27,25 +27,60 @@ TOP10_Q = 0.90
 SEED = 42
 
 
-def fetch(symbol: str, period: str = "max") -> pd.DataFrame:
-    x = yf.download(symbol, period=period, interval="1d", auto_adjust=False, progress=False)
-    if x.empty:
-        raise RuntimeError(f"No Yahoo data for {symbol}")
-    if isinstance(x.columns, pd.MultiIndex):
-        x.columns = x.columns.get_level_values(0)
-    x = x.rename(columns={"Close": "Ultimo", "Open": "Apertura", "High": "Massimo", "Low": "Minimo", "Volume": "Vol."})
-    x["Date"] = pd.to_datetime(x.index).tz_localize(None).normalize().astype("datetime64[ns]")
-    return x.reset_index(drop=True)[["Date", "Ultimo", "Apertura", "Massimo", "Minimo", "Vol."]]
+def _extract_symbol_frame(raw: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    if not isinstance(raw.columns, pd.MultiIndex):
+        return raw.copy()
+    for level in range(raw.columns.nlevels):
+        if symbol in set(raw.columns.get_level_values(level)):
+            out = raw.xs(symbol, axis=1, level=level, drop_level=True).copy()
+            if isinstance(out.columns, pd.MultiIndex):
+                out.columns = out.columns.get_level_values(-1)
+            return out
+    raise RuntimeError(f"Ticker {symbol} missing from batched Yahoo response")
+
+
+def fetch_batch(symbols: list[str], period: str = "max") -> dict[str, pd.DataFrame]:
+    last_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            raw = yf.download(
+                tickers=symbols,
+                period=period,
+                interval="1d",
+                auto_adjust=False,
+                progress=False,
+                group_by="column",
+                threads=False,
+            )
+            if raw.empty:
+                raise RuntimeError("Yahoo returned no data for batched download")
+            frames: dict[str, pd.DataFrame] = {}
+            for symbol in symbols:
+                x = _extract_symbol_frame(raw, symbol)
+                if x.empty:
+                    raise RuntimeError(f"No Yahoo data for {symbol}")
+                x = x.rename(columns={"Close":"Ultimo","Open":"Apertura","High":"Massimo","Low":"Minimo","Volume":"Vol."})
+                required = {"Ultimo","Apertura","Massimo","Minimo","Vol."}
+                if not required.issubset(x.columns):
+                    raise RuntimeError(f"Missing OHLCV columns for {symbol}: {sorted(required - set(x.columns))}")
+                idx = pd.to_datetime(x.index, errors="coerce")
+                if getattr(idx, "tz", None) is not None:
+                    idx = idx.tz_localize(None)
+                x["Date"] = idx.normalize().astype("datetime64[ns]")
+                frames[symbol] = x.reset_index(drop=True)[["Date","Ultimo","Apertura","Massimo","Minimo","Vol."]]
+            return frames
+        except Exception as exc:
+            last_error = exc
+            if attempt == 0:
+                time.sleep(8)
+    raise RuntimeError(f"Batched Yahoo download failed after retry: {last_error}") from last_error
 
 
 def fit(train: pd.DataFrame):
     tr = train.dropna(subset=FEATURES + [TARGET]).copy()
     if len(tr) < 500 or tr[TARGET].nunique() < 2:
         raise RuntimeError("Insufficient pooled training history")
-    model = HistGradientBoostingClassifier(
-        max_iter=250, max_leaf_nodes=15, learning_rate=0.05,
-        l2_regularization=2, random_state=SEED
-    )
+    model = HistGradientBoostingClassifier(max_iter=250,max_leaf_nodes=15,learning_rate=0.05,l2_regularization=2,random_state=SEED)
     model.fit(tr[FEATURES], tr[TARGET].astype(int))
     return model, tr
 
@@ -54,75 +89,49 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="results/v1_dynamic_top10_live_smoke.csv")
     args = ap.parse_args()
-
     root = Path(__file__).resolve().parents[1]
     config = json.loads((root / "config" / "tickers.json").read_text())
-    frames: dict[str, pd.DataFrame] = {}
-    benchmark = None
-    benchmark_symbol = None
-
-    for item in config["tickers"]:
-        d = load_yahoo_ohlcv(fetch(item["symbol"]))
-        if item["type"] == "benchmark":
-            benchmark = d
-            benchmark_symbol = item["symbol"]
-        else:
-            frames[item["symbol"]] = d
-
+    symbols = [item["symbol"] for item in config["tickers"]]
+    benchmark_symbol = next(item["symbol"] for item in config["tickers"] if item["type"] == "benchmark")
+    downloaded = fetch_batch(symbols)
+    benchmark = downloaded.get(benchmark_symbol)
     if benchmark is None:
         raise RuntimeError(f"Missing benchmark {benchmark_symbol}")
-
+    frames: dict[str, pd.DataFrame] = {}
+    for item in config["tickers"]:
+        if item["type"] != "benchmark":
+            frames[item["symbol"]] = load_yahoo_ohlcv(downloaded[item["symbol"]])
+    benchmark = load_yahoo_ohlcv(benchmark)
     frames = add_market_regime(frames, benchmark)
-    all_data = pd.concat([d.assign(symbol=s) for s, d in frames.items()], ignore_index=True)
+    all_data = pd.concat([d.assign(symbol=s) for s,d in frames.items()], ignore_index=True)
     all_data["Date"] = pd.to_datetime(all_data["Date"]).dt.normalize()
     latest_year = int(all_data["Date"].dt.year.max())
     train = all_data[all_data["Date"].dt.year < latest_year].copy()
     model, trainable = fit(train)
-
     candidates = trainable[trainable["ret"] <= DOWN_THRESHOLD].copy()
     if len(candidates) < 20:
         raise RuntimeError("Insufficient training rebound candidates for dynamic cutoff")
-    train_p = model.predict_proba(candidates[FEATURES])[:, 1]
+    train_p = model.predict_proba(candidates[FEATURES])[:,1]
     cutoff = float(np.quantile(train_p, TOP10_Q))
-    if not (0.0 < cutoff < 1.0):
+    if not 0.0 < cutoff < 1.0:
         raise RuntimeError(f"Invalid dynamic cutoff: {cutoff}")
-
-    rows = []
-    for symbol, d in frames.items():
-        latest = d.sort_values("Date").iloc[-1].copy()
+    rows=[]
+    for symbol,d in frames.items():
+        latest=d.sort_values("Date").iloc[-1].copy()
         if latest[FEATURES].isna().any():
             raise RuntimeError(f"Missing live features for {symbol}")
-        probability = float(model.predict_proba(pd.DataFrame([latest])[FEATURES])[:, 1][0])
-        ret = float(latest["ret"])
-        gate = ret <= DOWN_THRESHOLD
-        qualifies = bool(gate and probability >= cutoff)
-        rows.append({
-            "symbol": symbol,
-            "date": pd.Timestamp(latest["Date"]).date().isoformat(),
-            "ret": ret,
-            "probability": probability,
-            "dynamic_cutoff": cutoff,
-            "gate_down_2pct": gate,
-            "qualifies_dynamic_top10": qualifies,
-        })
-
-    report = pd.DataFrame(rows).sort_values("symbol").reset_index(drop=True)
-    numeric = ["ret", "probability", "dynamic_cutoff"]
-    if not np.isfinite(report[numeric].to_numpy(float)).all():
-        raise SystemExit("Invalid dynamic live smoke numeric result")
-    if report["dynamic_cutoff"].nunique() != 1:
-        raise SystemExit("Cutoff is not unique across live symbols")
-
-    out = root / args.out
-    out.parent.mkdir(parents=True, exist_ok=True)
-    report.to_csv(out, index=False)
+        probability=float(model.predict_proba(pd.DataFrame([latest])[FEATURES])[:,1][0])
+        ret=float(latest["ret"]); gate=ret <= DOWN_THRESHOLD; qualifies=bool(gate and probability >= cutoff)
+        rows.append({"symbol":symbol,"date":pd.Timestamp(latest["Date"]).date().isoformat(),"ret":ret,"probability":probability,"dynamic_cutoff":cutoff,"gate_down_2pct":gate,"qualifies_dynamic_top10":qualifies})
+    report=pd.DataFrame(rows).sort_values("symbol").reset_index(drop=True)
+    numeric=["ret","probability","dynamic_cutoff"]
+    if not np.isfinite(report[numeric].to_numpy(float)).all(): raise SystemExit("Invalid dynamic live smoke numeric result")
+    if report["dynamic_cutoff"].nunique()!=1: raise SystemExit("Cutoff is not unique across live symbols")
+    out=root/args.out; out.parent.mkdir(parents=True,exist_ok=True); report.to_csv(out,index=False)
     print("V1 DYNAMIC TOP10 LIVE SMOKE")
     print(f"latest_year={latest_year} n_train_rows={len(trainable)} n_train_candidates={len(candidates)}")
     print(f"dynamic_cutoff={cutoff:.6f}")
-    print(report.to_string(index=False))
-    print(f"Saved {out}")
-    print("V1 DYNAMIC TOP10 LIVE SMOKE PASS")
-
+    print(report.to_string(index=False)); print(f"Saved {out}"); print("V1 DYNAMIC TOP10 LIVE SMOKE PASS")
 
 if __name__ == "__main__":
     main()
