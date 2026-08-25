@@ -1,4 +1,4 @@
-"""Daily Yahoo Finance rebound scanner with Discord alerts.
+"""Daily Yahoo Finance rebound scanner with Discord heartbeat/status reports.
 
 The live scanner uses a pooled cross-ticker expanding-window model and adds
 Euro Stoxx 50 market-regime features. The production threshold can be fixed
@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -40,15 +42,10 @@ def fetch(symbol: str, period: str = "max") -> pd.DataFrame:
         raise RuntimeError(f"No Yahoo data for {symbol}")
     if isinstance(x.columns, pd.MultiIndex):
         x.columns = x.columns.get_level_values(0)
-    x = x.rename(
-        columns={
-            "Close": "Ultimo",
-            "Open": "Apertura",
-            "High": "Massimo",
-            "Low": "Minimo",
-            "Volume": "Vol.",
-        }
-    )
+    x = x.rename(columns={
+        "Close": "Ultimo", "Open": "Apertura", "High": "Massimo",
+        "Low": "Minimo", "Volume": "Vol."
+    })
     x["Date"] = pd.to_datetime(x.index).tz_localize(None).normalize().astype("datetime64[ns]")
     return x.reset_index(drop=True)[["Date", "Ultimo", "Apertura", "Massimo", "Minimo", "Vol."]]
 
@@ -61,9 +58,7 @@ def discord(message: str) -> None:
     r.raise_for_status()
 
 
-def add_market_regime(
-    frames: dict[str, pd.DataFrame], benchmark: pd.DataFrame
-) -> dict[str, pd.DataFrame]:
+def add_market_regime(frames: dict[str, pd.DataFrame], benchmark: pd.DataFrame) -> dict[str, pd.DataFrame]:
     b = benchmark[["Date", "Ultimo"]].copy()
     b["Date"] = pd.to_datetime(b["Date"], errors="coerce").dt.normalize().astype("datetime64[ns]")
     b = b.sort_values("Date")
@@ -95,11 +90,8 @@ def fit_pooled_model(all_data: pd.DataFrame):
     if len(train) < 500 or train[TARGET].nunique() < 2:
         raise RuntimeError("Insufficient pooled history for latest prediction")
     model = HistGradientBoostingClassifier(
-        max_iter=250,
-        max_leaf_nodes=15,
-        learning_rate=0.05,
-        l2_regularization=2,
-        random_state=SEED,
+        max_iter=250, max_leaf_nodes=15, learning_rate=0.05,
+        l2_regularization=2, random_state=SEED
     )
     model.fit(train[FEATURES], train[TARGET].astype(int))
     return model, trainable, train, latest_year
@@ -110,13 +102,9 @@ def dynamic_top_cutoff(model, train: pd.DataFrame) -> tuple[float, int]:
     quantile = float(signal.get("dynamic_top_quantile", 0.90))
     if not 0.0 < quantile < 1.0:
         raise RuntimeError(f"Invalid dynamic_top_quantile: {quantile}")
-    candidates = train[train["ret"] <= float(signal["down_day_threshold"])].dropna(
-        subset=FEATURES
-    )
+    candidates = train[train["ret"] <= float(signal["down_day_threshold"])].dropna(subset=FEATURES)
     if len(candidates) < 20:
-        raise RuntimeError(
-            f"Insufficient rebound candidates for dynamic cutoff: {len(candidates)}"
-        )
+        raise RuntimeError(f"Insufficient rebound candidates for dynamic cutoff: {len(candidates)}")
     probabilities = model.predict_proba(candidates[FEATURES])[:, 1]
     cutoff = float(pd.Series(probabilities).quantile(quantile))
     if not 0.0 < cutoff < 1.0:
@@ -139,9 +127,16 @@ def main() -> int:
     alerts = []
     down_threshold = float(CONFIG["signal"]["down_day_threshold"])
     frames: dict[str, pd.DataFrame] = {}
-    benchmark_symbol = next(
-        x["symbol"] for x in CONFIG["tickers"] if x["type"] == "benchmark"
-    )
+    benchmark_symbol = next(x["symbol"] for x in CONFIG["tickers"] if x["type"] == "benchmark")
+    scan_market = os.environ.get("SCAN_MARKET", "AUTO").strip().upper()
+    now_rome = datetime.now(ZoneInfo("Europe/Rome"))
+    now_ny = datetime.now(ZoneInfo("America/New_York"))
+    if scan_market == "MILAN":
+        market_label = "🇮🇹 MILANO"
+    elif scan_market == "US":
+        market_label = "🇺🇸 USA"
+    else:
+        market_label = "🌐 MARKET"
 
     for item in CONFIG["tickers"]:
         symbol = item["symbol"]
@@ -183,26 +178,31 @@ def main() -> int:
         if latest[FEATURES].isna().any():
             print(f"SKIP {symbol}: insufficient features for prediction")
             continue
-        latest["probability"] = float(
-            model.predict_proba(pd.DataFrame([latest])[FEATURES])[:, 1][0]
-        )
+        latest["probability"] = float(model.predict_proba(pd.DataFrame([latest])[FEATURES])[:, 1][0])
         predictions[symbol] = latest
 
+    status_lines = []
     for item in CONFIG["tickers"]:
         if item["type"] == "benchmark":
             continue
         symbol = item["symbol"]
         if symbol not in predictions:
+            status_lines.append(f"⚠️ {symbol}: dati insufficienti")
             continue
         latest = predictions[symbol]
         probability = float(latest["probability"])
         ret = float(latest["ret"])
+        qualifies = ret <= down_threshold and probability >= threshold
+        state = "🚨 SEGNALE" if qualifies else "✅ OK"
+        status_lines.append(
+            f"{state} **{symbol}** — ret {ret:.2%}, P {probability:.1%}"
+        )
         print(
             f"CHECK {symbol}: date={latest['Date'].date()} ret={ret:.2%} "
             f"model_p={probability:.1%} threshold={threshold:.1%} "
             f"mkt_1d={latest['mkt_ret']:.2%} rel_1d={latest['rel_ret_1']:.2%}"
         )
-        if ret <= down_threshold and probability >= threshold:
+        if qualifies:
             alerts.append(
                 f"🚨 **REBOUND SIGNAL — {symbol} ({item['name']})**\n"
                 f"Close: {latest['Ultimo']:.2f}\n"
@@ -214,11 +214,19 @@ def main() -> int:
                 f"Market 1d: {latest['mkt_ret']:.2%} | Relative: {latest['rel_ret_1']:.2%}"
             )
 
+    timestamp = now_rome.strftime("%Y-%m-%d %H:%M %Z")
+    header = (
+        f"**V1 DAILY CHECK — {market_label}**\n"
+        f"Ora controllo: {timestamp}\n"
+        f"Threshold: **{threshold:.1%}** ({threshold_mode})"
+    )
     if alerts:
-        discord("\n\n".join(alerts))
-        print(f"Sent {len(alerts)} Discord alert(s).")
+        message = header + "\n\n" + "\n".join(status_lines) + "\n\n" + "\n\n".join(alerts)
     else:
-        print("No qualifying rebound signals.")
+        message = header + "\n\n" + "\n".join(status_lines) + "\n\n✅ **Nessun segnale: sistema operativo.**"
+
+    discord(message)
+    print(f"Sent Discord status report for {market_label}.")
     return 0
 
 
