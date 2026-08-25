@@ -15,8 +15,6 @@ def _row(day, ret, score_share=1.0, symbol="TSLA"):
 
 
 def test_secondary_score_uses_only_prior_v1_candidates():
-    # Product-event observations are worse than the overall prior candidate
-    # baseline, so the final product event should receive a negative score.
     rows = pd.DataFrame([
         _row("2026-01-01", -0.08),
         _row("2026-01-02", 0.04, score_share=0.0),
@@ -53,6 +51,22 @@ def test_daily_rank_is_deterministic():
     a = score_oos(rows, min_n=2, shrink_k=0)
     b = score_oos(rows, min_n=2, shrink_k=0)
     pd.testing.assert_frame_equal(a, b)
+
+
+def test_inverted_score_is_exact_sign_flip():
+    rows = pd.DataFrame([
+        _row("2026-01-01", -0.08),
+        _row("2026-01-02", 0.04, score_share=0.0),
+        _row("2026-01-03", -0.08),
+        _row("2026-02-01", 0.02),
+    ])
+    normal = score_oos(rows, min_n=2, shrink_k=0)
+    inverted = score_oos(rows, min_n=2, shrink_k=0, invert_score=True)
+    pd.testing.assert_series_equal(
+        inverted["news_rank_score"],
+        -normal["news_rank_score"],
+        check_names=False,
+    )
 
 
 def test_raw_gkg_reconstructs_negative_event_share():
