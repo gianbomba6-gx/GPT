@@ -20,9 +20,6 @@ def prospective_filter(rows: pd.DataFrame, frac: float, direction: str, min_hist
             x.at[i, "eligible"] = True
             hist = prior if direction == "normal" else -prior
             current = x.at[i, "news_rank_score"] if direction == "normal" else -x.at[i, "news_rank_score"]
-            # Use deterministic rank-with-ties instead of a quantile cutoff.
-            # This prevents a large block of equal zero scores from being
-            # selected en masse and leaking the intended top-fraction semantics.
             combined = pd.concat([hist.reset_index(drop=True), pd.Series([current])], ignore_index=True)
             current_rank = int(combined.rank(method="first", ascending=False).iloc[-1])
             cutoff = max(1, int(np.ceil(frac * len(combined))))
@@ -65,7 +62,6 @@ def evaluate(candidates: pd.DataFrame, selected_rows: pd.DataFrame, label: str, 
         "cost_bps": cost_bps,
         "status": "INSUFFICIENT_HISTORY" if len(eligible) == 0 else ("NO_SELECTED_CASES" if selected.empty else "OK"),
     }
-
     if selected.empty:
         return result
 
@@ -104,8 +100,6 @@ def main() -> None:
     rows["news_rank_known_events"] = pd.to_numeric(rows.get("news_rank_known_events", 0), errors="coerce").fillna(0)
     rows["v1_top20"] = rows["v1_top20"].fillna(False).astype(bool)
 
-    # V1 baseline uses all V1 top20 candidates. News selection is evaluated
-    # only on rows where the news layer actually has an observed event score.
     base_rows = rows[rows["v1_top20"]].dropna(subset=["Date", "next_ret"]).copy()
     news_rows = base_rows[base_rows["news_rank_known_events"] > 0].dropna(subset=["news_rank_score"]).copy()
     base_rows["_row_id"] = np.arange(len(base_rows))
@@ -115,42 +109,38 @@ def main() -> None:
     parts = []
     for symbol, base in base_rows.groupby("symbol", sort=True):
         news = news_rows[news_rows["symbol"] == symbol].copy()
-        if news.empty:
-            reports.extend([
-                {
-                    "set": f"{symbol}: news_top25: normal", "n_base": len(base), "n_news_candidates": 0, "n_eligible": 0, "n_selected": 0,
-                    "mean_base": float(base["next_ret"].mean()) if len(base) else 0.0, "mean_selected_gross": 0.0, "mean_selected_net": 0.0,
-                    "delta_mean": 0.0, "ci_low": 0.0, "ci_high": 0.0, "cost_bps": args.cost_bps, "status": "INSUFFICIENT_HISTORY",
-                },
-            ])
-            for frac, label in ((0.25, "news_top25"), (0.50, "news_top50")):
-                if label != "news_top25":
-                    reports.append({
-                        "set": f"{symbol}: {label}: normal", "n_base": len(base), "n_news_candidates": 0, "n_eligible": 0, "n_selected": 0,
-                        "mean_base": float(base["next_ret"].mean()) if len(base) else 0.0, "mean_selected_gross": 0.0, "mean_selected_net": 0.0,
-                        "delta_mean": 0.0, "ci_low": 0.0, "ci_high": 0.0, "cost_bps": args.cost_bps, "status": "INSUFFICIENT_HISTORY",
-                    })
-            continue
-
-        for frac, label in ((0.25, "news_top25"), (0.50, "news_top50")):
-            for direction in ("normal", "inverted"):
-                x = prospective_filter(news, frac, direction, args.min_history)
-                result = evaluate(base, x, f"{symbol}: {label}: {direction}", args.n_boot, args.cost_bps)
-                result["n_news_candidates"] = len(news)
-                reports.append(result)
-                y = x.copy()
-                y["symbol"] = symbol
-                y["filter"] = label
-                y["direction"] = direction
-                parts.append(y)
-
-        # Explicit baseline row.
         mean_base = float(base["next_ret"].mean()) if len(base) else 0.0
+
+        if news.empty:
+            for frac, label in ((0.25, "news_top25"), (0.50, "news_top50")):
+                for direction in ("normal", "inverted"):
+                    reports.append({
+                        "set": f"{symbol}: {label}: {direction}",
+                        "n_base": len(base), "n_news_candidates": 0, "n_eligible": 0, "n_selected": 0,
+                        "mean_base": mean_base, "mean_selected_gross": 0.0, "mean_selected_net": 0.0,
+                        "delta_mean": 0.0, "ci_low": 0.0, "ci_high": 0.0, "cost_bps": args.cost_bps,
+                        "status": "INSUFFICIENT_HISTORY",
+                    })
+        else:
+            for frac, label in ((0.25, "news_top25"), (0.50, "news_top50")):
+                for direction in ("normal", "inverted"):
+                    x = prospective_filter(news, frac, direction, args.min_history)
+                    result = evaluate(base, x, f"{symbol}: {label}: {direction}", args.n_boot, args.cost_bps)
+                    result["n_news_candidates"] = len(news)
+                    reports.append(result)
+                    y = x.copy()
+                    y["symbol"] = symbol
+                    y["filter"] = label
+                    y["direction"] = direction
+                    parts.append(y)
+
         reports.append({
             "set": f"{symbol}: V1 top20 baseline",
-            "n_base": len(base), "n_news_candidates": len(news), "n_eligible": len(news), "n_selected": len(base),
-            "mean_base": mean_base, "mean_selected_gross": mean_base, "mean_selected_net": mean_base - args.cost_bps / 10000.0,
-            "delta_mean": 0.0, "ci_low": 0.0, "ci_high": 0.0, "cost_bps": args.cost_bps, "status": "OK",
+            "n_base": len(base), "n_news_candidates": len(news), "n_eligible": len(base), "n_selected": len(base),
+            "mean_base": mean_base, "mean_selected_gross": mean_base,
+            "mean_selected_net": mean_base - args.cost_bps / 10000.0,
+            "delta_mean": 0.0, "ci_low": 0.0, "ci_high": 0.0,
+            "cost_bps": args.cost_bps, "status": "OK",
         })
 
     report = pd.DataFrame(reports)
