@@ -32,8 +32,9 @@ def score_one_event_type(rows: pd.DataFrame, raw: pd.DataFrame, event_type: str,
     candidates = x[x["v1_top20"]].copy()
     parts = []
     for day in sorted(candidates["Date"].unique()):
-        prior = candidates[candidates["Date"] < pd.Timestamp(day)].copy()
-        test = candidates[candidates["Date"] == pd.Timestamp(day)].copy()
+        day_ts = pd.Timestamp(day)
+        prior = candidates[candidates["Date"] < day_ts].copy()
+        test = candidates[candidates["Date"] == day_ts].copy()
         if test.empty:
             continue
         hist = prior.loc[prior[col] > 0, ["symbol", "next_ret"]].copy()
@@ -53,7 +54,20 @@ def score_one_event_type(rows: pd.DataFrame, raw: pd.DataFrame, event_type: str,
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
 
-def evaluate(scored: pd.DataFrame, frac: float, invert: bool) -> pd.DataFrame:
+def bootstrap_ci(base_values: np.ndarray, selected_values: np.ndarray, n_boot: int, seed: int = 42) -> tuple[float, float, float]:
+    observed = float(selected_values.mean() - base_values.mean())
+    rng = np.random.default_rng(seed)
+    base_n, selected_n = len(base_values), len(selected_values)
+    boot = np.empty(n_boot, dtype=float)
+    for i in range(n_boot):
+        b = base_values[rng.integers(0, base_n, size=base_n)]
+        s = selected_values[rng.integers(0, selected_n, size=selected_n)]
+        boot[i] = float(s.mean() - b.mean())
+    lo, hi = np.quantile(boot, [0.025, 0.975])
+    return observed, float(lo), float(hi)
+
+
+def evaluate(scored: pd.DataFrame, frac: float, invert: bool, n_boot: int) -> pd.DataFrame:
     out = []
     for symbol, s in scored.groupby("symbol", sort=True):
         base = s[s["next_ret"].notna()].copy()
@@ -61,7 +75,8 @@ def evaluate(scored: pd.DataFrame, frac: float, invert: bool) -> pd.DataFrame:
         if elig.empty:
             out.append(dict(symbol=symbol, n_base=len(base), n_eligible=0, n_selected=0,
                             mean_base=float(base.next_ret.mean()) if len(base) else 0.0,
-                            mean_selected_gross=0.0, delta_mean=0.0, status="NO_ELIGIBLE_CASES"))
+                            mean_selected_gross=0.0, delta_mean=0.0, ci_low=0.0, ci_high=0.0,
+                            status="NO_ELIGIBLE_CASES"))
             continue
         vals = -elig["event_score"] if invert else elig["event_score"]
         elig = elig.copy()
@@ -69,11 +84,16 @@ def evaluate(scored: pd.DataFrame, frac: float, invert: bool) -> pd.DataFrame:
         cutoff = max(1, int(np.ceil(frac * len(elig))))
         sel = elig[elig["rank"] <= cutoff]
         mean_base = float(base.next_ret.mean())
-        mean_sel = float(sel.next_ret.mean()) if len(sel) else 0.0
+        if sel.empty:
+            out.append(dict(symbol=symbol, n_base=len(base), n_eligible=len(elig), n_selected=0,
+                            mean_base=mean_base, mean_selected_gross=0.0, delta_mean=0.0,
+                            ci_low=0.0, ci_high=0.0, status="NO_SELECTED_CASES"))
+            continue
+        mean_sel = float(sel.next_ret.mean())
+        delta, lo, hi = bootstrap_ci(base.next_ret.to_numpy(float), sel.next_ret.to_numpy(float), n_boot)
         out.append(dict(symbol=symbol, n_base=len(base), n_eligible=len(elig), n_selected=len(sel),
-                        mean_base=mean_base, mean_selected_gross=mean_sel,
-                        delta_mean=mean_sel - mean_base if len(sel) else 0.0,
-                        status="OK" if len(sel) else "NO_SELECTED_CASES"))
+                        mean_base=mean_base, mean_selected_gross=mean_sel, delta_mean=delta,
+                        ci_low=lo, ci_high=hi, status="OK"))
     return pd.DataFrame(out)
 
 
@@ -84,7 +104,11 @@ def main() -> None:
     ap.add_argument("--out", default="results/news_v3_lag1_event_type_diagnostics.csv")
     ap.add_argument("--min-n", type=int, default=20)
     ap.add_argument("--shrink-k", type=float, default=50.0)
+    ap.add_argument("--n-boot", type=int, default=10000)
     args = ap.parse_args()
+
+    if args.min_n < 1 or args.shrink_k < 0 or args.n_boot < 100:
+        raise SystemExit("Invalid diagnostic parameters")
 
     rows = pd.read_csv(args.rows_csv)
     raw = pd.read_csv(args.raw_gkg)
@@ -93,7 +117,7 @@ def main() -> None:
         scored = score_one_event_type(rows, raw, event_type, args.min_n, args.shrink_k)
         for frac, label in ((0.25, "top25"), (0.50, "top50")):
             for invert in (False, True):
-                r = evaluate(scored, frac, invert)
+                r = evaluate(scored, frac, invert, args.n_boot)
                 r["event_type"] = event_type
                 r["selection"] = label
                 r["direction"] = "inverted" if invert else "normal"
@@ -101,8 +125,13 @@ def main() -> None:
 
     report = pd.concat(reports, ignore_index=True)
     cols = ["event_type", "symbol", "selection", "direction", "n_base", "n_eligible", "n_selected",
-            "mean_base", "mean_selected_gross", "delta_mean", "status"]
+            "mean_base", "mean_selected_gross", "delta_mean", "ci_low", "ci_high", "status"]
     report = report[cols].sort_values(["event_type", "symbol", "selection", "direction"])
+    numeric_cols = ["n_base", "n_eligible", "n_selected", "mean_base", "mean_selected_gross", "delta_mean", "ci_low", "ci_high"]
+    ok = report[report["status"].eq("OK")]
+    if ok.empty or not np.isfinite(ok[numeric_cols].to_numpy(float)).all():
+        raise SystemExit("Invalid event-type diagnostic result")
+
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     report.to_csv(args.out, index=False)
     print("NEWS V3 LAG1 EVENT TYPE DIAGNOSTICS")
