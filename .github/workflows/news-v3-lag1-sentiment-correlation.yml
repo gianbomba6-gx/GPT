@@ -1,0 +1,58 @@
+name: News V3 lag1 sentiment correlation
+on:
+  workflow_dispatch:
+jobs:
+  sentiment-correlation:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Find inputs
+        id: inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          wf=$(gh api "/repos/${GITHUB_REPOSITORY}/actions/workflows/news-v3-event-walkforward-filter.yml/runs?status=success&per_page=20" --jq '.workflow_runs[0].id')
+          hist=$(gh api "/repos/${GITHUB_REPOSITORY}/actions/workflows/news-v2-historical-backfill.yml/runs?status=success&per_page=20" --jq '.workflow_runs[0].id')
+          wa=$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${wf}/artifacts?per_page=100" --jq '.artifacts[]|select(.name=="news-v3-event-walkforward-filter")|.id'|head -n1)
+          ha=$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${hist}/artifacts?per_page=100" --jq '.artifacts[]|select(.name=="news-v3-event-aware-historical-final")|.id'|head -n1)
+          test -n "$wa"; test -n "$ha"; echo "wa=$wa" >> "$GITHUB_OUTPUT"; echo "ha=$ha" >> "$GITHUB_OUTPUT"
+      - name: Download inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WA: ${{ steps.inputs.outputs.wa }}
+          HA: ${{ steps.inputs.outputs.ha }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/wf /tmp/hist results
+          gh api "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${WA}/zip" > /tmp/wf.zip
+          gh api "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${HA}/zip" > /tmp/hist.zip
+          unzip -q /tmp/wf.zip -d /tmp/wf; unzip -q /tmp/hist.zip -d /tmp/hist
+          cp "$(find /tmp/wf -name news_v3_event_walkforward_filter_rows.csv -print -quit)" results/news_v3_event_walkforward_filter_rows.csv
+          cp "$(find /tmp/hist -name news_v2_full_raw.csv -print -quit)" results/news_v2_full_raw.csv
+      - name: Run correlation
+        run: python src/news_v3_lag1_sentiment_corr.py results/news_v3_event_walkforward_filter_rows.csv results/news_v2_full_raw.csv --out results/news_v3_lag1_sentiment_corr.csv
+      - name: Validate
+        run: |
+          python - <<'PY'
+          import numpy as np, pandas as pd
+          p='results/news_v3_lag1_sentiment_corr.csv'; d=pd.read_csv(p)
+          req={'symbol','n_base','n_news_days','spearman_polarity_next_ret','status'}
+          if not req.issubset(d.columns) or d.empty: raise SystemExit('Invalid sentiment correlation schema')
+          ok=d[d.status.eq('OK')]
+          if not ok.empty and not np.isfinite(ok['spearman_polarity_next_ret'].to_numpy(float)).all(): raise SystemExit('Invalid sentiment correlation value')
+          print('NEWS V3 LAG1 SENTIMENT CORRELATION PASS'); print(d.to_string(index=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: news-v3-lag1-sentiment-correlation
+          path: market_rebound_model/results/news_v3_lag1_sentiment_corr.csv
+          if-no-files-found: error
