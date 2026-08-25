@@ -4,7 +4,9 @@ on:
   push:
     paths:
       - 'market_rebound_model/src/news_v3_nvda_selection_bootstrap.py'
+      - 'market_rebound_model/src/news_v3_nvda_selection_robustness.py'
       - 'market_rebound_model/tests/test_news_v3_nvda_selection_bootstrap.py'
+      - 'market_rebound_model/tests/test_news_v3_nvda_selection_robustness.py'
       - '.github/workflows/news-v3-nvda-selection.yml'
   workflow_dispatch:
 
@@ -24,8 +26,11 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: pip install -r requirements.txt pytest
-      - name: Test selection bootstrap
-        run: python -m pytest -q tests/test_news_v3_nvda_selection_bootstrap.py
+      - name: Test selection bootstrap and robustness
+        run: |
+          python -m pytest -q \
+            tests/test_news_v3_nvda_selection_bootstrap.py \
+            tests/test_news_v3_nvda_selection_robustness.py
       - name: Find latest secondary ranking artifact
         id: artifact
         env:
@@ -56,6 +61,16 @@ jobs:
             results/news_v3_secondary_ranking_inverted_rows.csv \
             --out results/news_v3_nvda_selection_bootstrap.csv \
             --n-boot 10000
+      - name: Run prospective NVDA robustness
+        run: |
+          python src/news_v3_nvda_selection_robustness.py \
+            results/news_v3_secondary_ranking_inverted_rows.csv \
+            --out results/news_v3_nvda_selection_robustness.csv \
+            --out-rows results/news_v3_nvda_selection_prospective_rows.csv \
+            --out-stability results/news_v3_nvda_selection_stability.csv \
+            --n-boot 10000 \
+            --min-history 20 \
+            --cost-bps 20
       - name: Validate
         run: |
           python - <<'PY'
@@ -72,11 +87,39 @@ jobs:
                   raise SystemExit('Invalid NVDA selection counts')
               if row.ci_low > row.ci_high:
                   raise SystemExit('Invalid bootstrap CI ordering')
+
+          rr = pd.read_csv('results/news_v3_nvda_selection_robustness.csv')
+          if set(rr['selection']) != {'top25','top50'}:
+              raise SystemExit('Missing prospective NVDA selection groups')
+          for _, row in rr.iterrows():
+              vals = [row.n_total, row.n_eligible, row.n_selected, row.delta_mean, row.ci_low, row.ci_high]
+              if not all(np.isfinite(vals)):
+                  raise SystemExit('Non-finite prospective NVDA robustness result')
+              if row.n_eligible <= 0 or row.n_selected <= 0 or row.n_selected > row.n_eligible:
+                  raise SystemExit('Invalid prospective NVDA counts')
+              if row.ci_low > row.ci_high:
+                  raise SystemExit('Invalid prospective bootstrap CI ordering')
+
+          stability = pd.read_csv('results/news_v3_nvda_selection_stability.csv')
+          required = {'period','n_eligible','n_selected','mean_all','mean_selected_gross','mean_selected_net','delta_mean'}
+          if not required.issubset(stability.columns):
+              raise SystemExit('Invalid NVDA stability schema')
+          if not stability['n_eligible'].gt(0).all():
+              raise SystemExit('Invalid NVDA stability sample')
+
           print('NVDA NEWS SELECTION PASS')
           print(r.to_string(index=False))
+          print('NVDA PROSPECTIVE ROBUSTNESS PASS')
+          print(rr.to_string(index=False))
+          print('NVDA TOP50 STABILITY')
+          print(stability.to_string(index=False))
           PY
       - uses: actions/upload-artifact@v4
         with:
           name: news-v3-nvda-selection-bootstrap
-          path: market_rebound_model/results/news_v3_nvda_selection_bootstrap.csv
+          path: |
+            market_rebound_model/results/news_v3_nvda_selection_bootstrap.csv
+            market_rebound_model/results/news_v3_nvda_selection_robustness.csv
+            market_rebound_model/results/news_v3_nvda_selection_prospective_rows.csv
+            market_rebound_model/results/news_v3_nvda_selection_stability.csv
           if-no-files-found: error
