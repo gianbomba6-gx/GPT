@@ -35,13 +35,7 @@ def _event_score_rules(
     min_n: int = MIN_N,
     shrink_k: float = SHRINK_K,
 ) -> dict[tuple[str, str], float]:
-    """Learn event deltas against the full prior-candidate baseline.
-
-    ``event_history`` is long-form and contains only candidate rows carrying a
-    given event. ``baseline_history`` contains every prior V1 top20 candidate.
-    Keeping these separate is essential: otherwise the event mean and baseline
-    mean would be computed from the same rows and the score would collapse to 0.
-    """
+    """Learn event deltas against the full prior-candidate baseline."""
     rules: dict[tuple[str, str], float] = {}
     for (symbol, event), s in event_history.groupby(["symbol", "event_type"], sort=False):
         q = s["next_ret"].dropna()
@@ -72,6 +66,7 @@ def score_oos(
     raw: pd.DataFrame | None = None,
     min_n: int = MIN_N,
     shrink_k: float = SHRINK_K,
+    invert_score: bool = False,
 ) -> pd.DataFrame:
     required = {"Date", "symbol", "next_ret", "v1_top20"}
     missing = required - set(rows.columns)
@@ -85,9 +80,6 @@ def score_oos(
     x["v1_top20"] = x["v1_top20"].fillna(False).astype(bool)
     x = x.dropna(subset=["Date", "symbol"]).sort_values(["Date", "symbol"]).reset_index(drop=True)
 
-    # Historical OOS rows do not contain negative_event_*_share. Reconstruct
-    # them from raw GKG using the exact market-close cutoff of the walk-forward
-    # filter, preventing a second, inconsistent event definition.
     if raw is not None:
         events = _event_features(raw)
         event_cols = ["Date", "symbol", *[f"negative_event_{e}_share" for e in EVENT_TYPES]]
@@ -110,7 +102,6 @@ def score_oos(
         if test.empty:
             continue
 
-        # Learn only from earlier V1 candidates. Never use the current day.
         long_parts: list[pd.DataFrame] = []
         for event in EVENT_TYPES:
             mask = prior[f"negative_event_{event}_share"] > 0
@@ -130,6 +121,8 @@ def score_oos(
         )
 
         test["news_rank_score"] = test.apply(lambda r: _score_row(r, rules), axis=1)
+        if invert_score:
+            test["news_rank_score"] = -test["news_rank_score"]
         test["news_rank_known_events"] = test.apply(
             lambda r: sum(
                 1
@@ -190,10 +183,17 @@ def main() -> None:
     ap.add_argument("--out", default="results/news_v3_secondary_ranking.csv")
     ap.add_argument("--min-n", type=int, default=MIN_N)
     ap.add_argument("--shrink-k", type=float, default=SHRINK_K)
+    ap.add_argument("--invert-score", action="store_true")
     args = ap.parse_args()
     rows = pd.read_csv(args.rows_csv)
     raw = pd.read_csv(args.raw_gkg) if args.raw_gkg else None
-    scored = score_oos(rows, raw=raw, min_n=args.min_n, shrink_k=args.shrink_k)
+    scored = score_oos(
+        rows,
+        raw=raw,
+        min_n=args.min_n,
+        shrink_k=args.shrink_k,
+        invert_score=args.invert_score,
+    )
     if scored.empty:
         raise SystemExit("No V1 top20 rows available for secondary news ranking")
     report, quartiles = build_report(scored)
@@ -202,6 +202,7 @@ def main() -> None:
     report.to_csv(p, index=False)
     quartiles.to_csv(p.with_name("news_v3_secondary_ranking_quartiles.csv"), index=False)
     scored.to_csv(p.with_name("news_v3_secondary_ranking_rows.csv"), index=False)
+    print("INVERTED_SCORE=" + str(args.invert_score))
     print("SYMBOL REPORT")
     print(report.to_string(index=False))
     print("SCORE QUARTILES")
