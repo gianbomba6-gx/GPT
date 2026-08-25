@@ -1,0 +1,62 @@
+name: V1 objective audit
+
+on:
+  workflow_dispatch:
+
+jobs:
+  v1-objective-audit:
+    name: Walk-forward V1 objective audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+
+      - name: Run V1 objective audit
+        run: python src/v1_objective_audit.py --out results/v1_objective_audit.csv
+
+      - name: Validate V1 objective audit
+        run: |
+          python - <<'PY'
+          import numpy as np
+          import pandas as pd
+          p = 'results/v1_objective_audit.csv'
+          d = pd.read_csv(p)
+          required = {
+              'year','variant','n_baseline','n_selected','mean_baseline',
+              'mean_selected','delta_mean','hit3_baseline','hit3_selected','auc'
+          }
+          if not required.issubset(d.columns) or d.empty:
+              raise SystemExit('Invalid V1 objective audit schema')
+          if not set(d['variant']).issubset({'target_2','target_3','target_5','regression'}):
+              raise SystemExit('Unexpected V1 objective variant')
+          if (d['n_selected'] > d['n_baseline']).any():
+              raise SystemExit('Invalid V1 objective counts')
+          numeric = ['n_baseline','n_selected','mean_baseline','mean_selected','delta_mean','hit3_baseline','hit3_selected']
+          if not np.isfinite(d[numeric].to_numpy(float)).all():
+              raise SystemExit('Invalid V1 objective numeric result')
+          auc = d['auc'].dropna()
+          if not auc.empty and not np.isfinite(auc.to_numpy(float)).all():
+              raise SystemExit('Invalid V1 objective AUC')
+          print('V1 OBJECTIVE AUDIT PASS')
+          print(d.to_string(index=False))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v1-objective-audit
+          path: market_rebound_model/results/v1_objective_audit.csv
+          if-no-files-found: error
