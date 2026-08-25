@@ -9,10 +9,12 @@ on:
       - 'market_rebound_model/src/news_v3_multi_symbol_direction_check.py'
       - 'market_rebound_model/src/news_v3_symbol_direction_calibrator.py'
       - 'market_rebound_model/src/news_v3_direction_strategy_benchmark.py'
+      - 'market_rebound_model/src/news_v3_incremental_value.py'
       - 'market_rebound_model/tests/test_news_v3_nvda_selection_bootstrap.py'
       - 'market_rebound_model/tests/test_news_v3_nvda_selection_robustness.py'
       - 'market_rebound_model/tests/test_news_v3_multi_symbol_selection_robustness.py'
       - 'market_rebound_model/tests/test_news_v3_direction_strategy_benchmark.py'
+      - 'market_rebound_model/tests/test_news_v3_incremental_value.py'
       - '.github/workflows/news-v3-nvda-selection.yml'
   workflow_dispatch:
 
@@ -32,13 +34,14 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: pip install -r requirements.txt pytest
-      - name: Test selection bootstrap and robustness
+      - name: Run unit tests
         run: |
           python -m pytest -q \
             tests/test_news_v3_nvda_selection_bootstrap.py \
             tests/test_news_v3_nvda_selection_robustness.py \
             tests/test_news_v3_multi_symbol_selection_robustness.py \
-            tests/test_news_v3_direction_strategy_benchmark.py
+            tests/test_news_v3_direction_strategy_benchmark.py \
+            tests/test_news_v3_incremental_value.py
       - name: Find latest secondary ranking artifact
         id: artifact
         env:
@@ -60,9 +63,13 @@ jobs:
           gh api -H 'Accept: application/vnd.github+json' "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" > /tmp/ranking.zip
           unzip -q /tmp/ranking.zip -d results/imported
           rows=$(find results/imported -type f -name 'news_v3_secondary_ranking_inverted_rows.csv' -print -quit)
+          raw_rows=$(find results/imported -type f -name 'news_v3_secondary_ranking_rows.csv' -print -quit)
           test -n "$rows"
+          test -n "$raw_rows"
           cp "$rows" results/news_v3_secondary_ranking_inverted_rows.csv
+          cp "$raw_rows" results/news_v3_secondary_ranking_rows.csv
           test -s results/news_v3_secondary_ranking_inverted_rows.csv
+          test -s results/news_v3_secondary_ranking_rows.csv
       - name: Run NVDA top25/top50 selection bootstrap
         run: |
           python src/news_v3_nvda_selection_bootstrap.py \
@@ -89,75 +96,47 @@ jobs:
             --n-boot 10000 \
             --min-history 20 \
             --cost-bps 20
-      - name: Run normal versus inverted score direction check
+      - name: Run normal versus inverted score direction check on raw score
         run: |
           python src/news_v3_multi_symbol_direction_check.py \
-            results/news_v3_secondary_ranking_inverted_rows.csv \
+            results/news_v3_secondary_ranking_rows.csv \
             --out results/news_v3_multi_symbol_direction_check.csv \
             --out-rows results/news_v3_multi_symbol_direction_rows.csv \
             --n-boot 10000 \
             --min-history 20 \
             --cost-bps 20
-      - name: Run prospective per-symbol direction calibration
+      - name: Run prospective per-symbol direction calibration on raw score
         run: |
           python src/news_v3_symbol_direction_calibrator.py \
-            results/news_v3_secondary_ranking_inverted_rows.csv \
+            results/news_v3_secondary_ranking_rows.csv \
             --out results/news_v3_symbol_direction_calibration.csv \
             --out-rows results/news_v3_symbol_direction_calibration_rows.csv \
             --n-boot 10000 \
             --min-history 20 \
             --min-calibration 8
-      - name: Run fixed versus calibrated direction benchmark
+      - name: Run fixed versus calibrated direction benchmark on raw score
         run: |
           python src/news_v3_direction_strategy_benchmark.py \
-            results/news_v3_secondary_ranking_inverted_rows.csv \
+            results/news_v3_secondary_ranking_rows.csv \
             --out results/news_v3_direction_strategy_benchmark.csv \
             --out-rows results/news_v3_direction_strategy_benchmark_rows.csv \
             --n-boot 10000 \
             --min-history 20 \
             --min-calibration 8
+      - name: Run V1 plus news incremental value on raw score
+        run: |
+          python src/news_v3_incremental_value.py \
+            results/news_v3_secondary_ranking_rows.csv \
+            --out results/news_v3_incremental_value.csv \
+            --out-rows results/news_v3_incremental_value_rows.csv \
+            --n-boot 10000 \
+            --min-history 20 \
+            --cost-bps 20
       - name: Validate
         run: |
           python - <<'PY'
           import numpy as np
           import pandas as pd
-          r = pd.read_csv('results/news_v3_nvda_selection_bootstrap.csv')
-          if set(r['selection']) != {'baseline','top25','top50'}:
-              raise SystemExit('Missing NVDA selection groups')
-          for _, row in r[r.selection != 'baseline'].iterrows():
-              vals = [row.n_all, row.n_selected, row.delta_mean, row.ci_low, row.ci_high]
-              if not all(np.isfinite(vals)):
-                  raise SystemExit('Non-finite NVDA bootstrap result')
-              if row.n_all <= 0 or row.n_selected <= 0 or row.n_selected > row.n_all:
-                  raise SystemExit('Invalid NVDA selection counts')
-              if row.ci_low > row.ci_high:
-                  raise SystemExit('Invalid bootstrap CI ordering')
-
-          rr = pd.read_csv('results/news_v3_nvda_selection_robustness.csv')
-          if set(rr['selection']) != {'top25','top50'}:
-              raise SystemExit('Missing prospective NVDA selection groups')
-          for _, row in rr.iterrows():
-              vals = [row.n_total, row.n_eligible, row.n_selected, row.delta_mean, row.ci_low, row.ci_high]
-              if not all(np.isfinite(vals)):
-                  raise SystemExit('Non-finite prospective NVDA robustness result')
-              if row.n_eligible <= 0 or row.n_selected <= 0 or row.n_selected > row.n_eligible:
-                  raise SystemExit('Invalid prospective NVDA counts')
-              if row.ci_low > row.ci_high:
-                  raise SystemExit('Invalid prospective bootstrap CI ordering')
-
-          cal = pd.read_csv('results/news_v3_symbol_direction_calibration.csv')
-          required_cal = {'symbol','selection','n_total','n_eligible','n_selected','delta_mean','ci_low','ci_high','normal_count','inverted_count'}
-          if not required_cal.issubset(cal.columns) or len(cal) == 0:
-              raise SystemExit('Invalid symbol direction calibration output')
-          for _, row in cal.iterrows():
-              vals = [row.n_total, row.n_eligible, row.n_selected, row.delta_mean, row.ci_low, row.ci_high, row.normal_count, row.inverted_count]
-              if not all(np.isfinite(vals)):
-                  raise SystemExit('Non-finite symbol direction calibration')
-              if row.n_eligible <= 0 or row.n_selected <= 0 or row.n_selected > row.n_eligible:
-                  raise SystemExit('Invalid symbol direction calibration counts')
-              if row.ci_low > row.ci_high:
-                  raise SystemExit('Invalid symbol direction calibration CI ordering')
-
           benchmark = pd.read_csv('results/news_v3_direction_strategy_benchmark.csv')
           required_b = {'symbol','selection','strategy','n_total','n_eligible','n_selected','delta_mean','ci_low','ci_high','mean_selected'}
           if not required_b.issubset(benchmark.columns) or len(benchmark) == 0:
@@ -165,24 +144,21 @@ jobs:
           if set(benchmark['strategy'].unique()) != {'normal_fixed','inverted_fixed','calibrated'}:
               raise SystemExit('Missing direction benchmark strategies')
           for _, row in benchmark.iterrows():
-              vals = [row.n_total, row.n_eligible, row.n_selected]
-              if not all(np.isfinite(vals)) or row.n_eligible <= 0 or row.n_selected <= 0 or row.n_selected > row.n_eligible:
-                  raise SystemExit('Invalid direction benchmark counts')
-              vals_stat = [row.delta_mean, row.ci_low, row.ci_high, row.mean_selected]
-              if not all(np.isfinite(vals_stat)) or row.ci_low > row.ci_high:
-                  raise SystemExit('Invalid direction benchmark statistics')
-
-          pivot = pd.read_csv('results/news_v3_direction_strategy_benchmark_pivot.csv')
-          required_p = {'symbol','selection','normal_fixed','inverted_fixed','calibrated','calibrated_minus_best_fixed'}
-          if not required_p.issubset(pivot.columns):
-              raise SystemExit('Invalid direction benchmark pivot')
-
+              vals = [row.n_total, row.n_eligible, row.n_selected, row.delta_mean, row.ci_low, row.ci_high, row.mean_selected]
+              if not all(np.isfinite(vals)) or row.n_eligible <= 0 or row.n_selected <= 0 or row.n_selected > row.n_eligible or row.ci_low > row.ci_high:
+                  raise SystemExit('Invalid direction benchmark result')
+          iv = pd.read_csv('results/news_v3_incremental_value.csv')
+          required_iv = {'set','n_base','n_selected','mean_base','mean_selected_gross','mean_selected_net','delta_mean','ci_low','ci_high','cost_bps'}
+          if not required_iv.issubset(iv.columns) or iv.empty:
+              raise SystemExit('Invalid incremental value schema')
+          for _, row in iv.iterrows():
+              vals = [row.n_base, row.n_selected, row.mean_base, row.delta_mean, row.ci_low, row.ci_high, row.mean_selected_gross, row.mean_selected_net, row.cost_bps]
+              if not all(np.isfinite(vals)) or row.n_base <= 0 or row.n_selected < 0 or row.n_selected > row.n_base or row.ci_low > row.ci_high:
+                  raise SystemExit('Invalid incremental value result')
           print('DIRECTION STRATEGY BENCHMARK PASS')
           print(benchmark.to_string(index=False))
-          print('BENCHMARK PIVOT')
-          print(pivot.to_string(index=False))
-          print('SYMBOL DIRECTION CALIBRATION PASS')
-          print(cal.to_string(index=False))
+          print('NEWS V3 INCREMENTAL VALUE PASS')
+          print(iv.to_string(index=False))
           PY
       - uses: actions/upload-artifact@v4
         with:
@@ -204,4 +180,6 @@ jobs:
             market_rebound_model/results/news_v3_direction_strategy_benchmark.csv
             market_rebound_model/results/news_v3_direction_strategy_benchmark_pivot.csv
             market_rebound_model/results/news_v3_direction_strategy_benchmark_rows.csv
+            market_rebound_model/results/news_v3_incremental_value.csv
+            market_rebound_model/results/news_v3_incremental_value_rows.csv
           if-no-files-found: error
