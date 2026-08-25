@@ -1,0 +1,127 @@
+name: News V3 lag1 news sentiment
+
+on:
+  workflow_dispatch:
+
+jobs:
+  news-sentiment:
+    name: Prior-day news sentiment
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+
+      - name: Find latest usable walk-forward artifact
+        id: wf_artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id=$(gh api -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/news-v3-event-walkforward-filter.yml/runs?status=success&per_page=20" \
+            --jq '.workflow_runs[0].id')
+          test -n "$run_id" && test "$run_id" != null
+          artifact_id=$(gh api -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name=="news-v3-event-walkforward-filter") | .id' | head -n1)
+          test -n "$artifact_id"
+          echo "artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
+
+      - name: Find latest historical artifact with raw GKG
+        id: hist_artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id=$(gh api -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/news-v2-historical-backfill.yml/runs?status=success&per_page=20" \
+            --jq '.workflow_runs[0].id')
+          test -n "$run_id" && test "$run_id" != null
+          artifact_id=$(gh api -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name=="news-v3-event-aware-historical-final") | .id' | head -n1)
+          test -n "$artifact_id"
+          echo "artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
+
+      - name: Download sentiment inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WF_ARTIFACT_ID: ${{ steps.wf_artifact.outputs.artifact_id }}
+          HIST_ARTIFACT_ID: ${{ steps.hist_artifact.outputs.artifact_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p results/imported/wf results/imported/hist
+          gh api -H 'Accept: application/vnd.github+json' "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${WF_ARTIFACT_ID}/zip" > /tmp/ranking.zip
+          gh api -H 'Accept: application/vnd.github+json' "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${HIST_ARTIFACT_ID}/zip" > /tmp/history.zip
+          unzip -q /tmp/ranking.zip -d results/imported/wf
+          unzip -q /tmp/history.zip -d results/imported/hist
+          rows=$(find results/imported/wf -type f -name 'news_v3_event_walkforward_filter_rows.csv' -print -quit)
+          raw=$(find results/imported/hist -type f -name 'news_v2_full_raw.csv' -print -quit)
+          test -n "$rows"
+          test -n "$raw"
+          cp "$rows" results/news_v3_event_walkforward_filter_rows.csv
+          cp "$raw" results/news_v2_full_raw.csv
+          test -s results/news_v3_event_walkforward_filter_rows.csv
+          test -s results/news_v2_full_raw.csv
+
+      - name: Run lag1 news sentiment
+        run: |
+          python src/news_v3_lag1_news_sentiment.py \
+            results/news_v3_event_walkforward_filter_rows.csv \
+            results/news_v2_full_raw.csv \
+            --out results/news_v3_lag1_news_sentiment.csv \
+            --out-stability results/news_v3_lag1_news_sentiment_stability.csv \
+            --n-boot 10000
+
+      - name: Validate news sentiment results
+        run: |
+          python - <<'PY'
+          import numpy as np
+          import pandas as pd
+          iv = pd.read_csv('results/news_v3_lag1_news_sentiment.csv')
+          st = pd.read_csv('results/news_v3_lag1_news_sentiment_stability.csv')
+          req_iv = {'symbol','bucket','n_base','n_bucket','mean_base','mean_bucket','delta_mean','ci_low','ci_high','status'}
+          if not req_iv.issubset(iv.columns) or iv.empty:
+              raise SystemExit('Invalid news sentiment schema')
+          num_iv = ['n_base','n_bucket','mean_base','mean_bucket','delta_mean','ci_low','ci_high']
+          ok = iv[iv['status'].eq('OK')]
+          if not ok.empty and not np.isfinite(ok[num_iv].to_numpy(float)).all():
+              raise SystemExit('Invalid news sentiment numeric result')
+          if (iv['n_bucket'] > iv['n_base']).any():
+              raise SystemExit('Invalid news sentiment counts')
+          if not st.empty:
+              req_st = {'symbol','year','bucket','n_base','n_bucket','mean_base','mean_bucket','delta_mean','status'}
+              if not req_st.issubset(st.columns):
+                  raise SystemExit('Invalid news sentiment stability schema')
+              ok_st = st[st['status'].eq('OK')]
+              num_st = ['n_base','n_bucket','mean_base','mean_bucket','delta_mean']
+              if not ok_st.empty and not np.isfinite(ok_st[num_st].to_numpy(float)).all():
+                  raise SystemExit('Invalid news sentiment stability numeric result')
+          print('NEWS V3 LAG1 NEWS SENTIMENT PASS')
+          print(iv.to_string(index=False))
+          print('NEWS V3 LAG1 NEWS SENTIMENT STABILITY PASS')
+          print(st.to_string(index=False))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: news-v3-lag1-news-sentiment
+          path: |
+            market_rebound_model/results/news_v3_lag1_news_sentiment.csv
+            market_rebound_model/results/news_v3_lag1_news_sentiment_stability.csv
+          if-no-files-found: error
