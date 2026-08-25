@@ -1,0 +1,53 @@
+name: V1 threshold audit
+
+on:
+  workflow_dispatch:
+
+jobs:
+  v1-threshold-audit:
+    name: Walk-forward V1 threshold audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt pytest
+      - name: Run V1 threshold audit
+        run: |
+          python src/v1_threshold_audit.py \
+            --out results/v1_threshold_audit.csv \
+            --out-stability results/v1_threshold_audit_stability.csv \
+            --n-boot 10000
+      - name: Validate V1 threshold audit
+        run: |
+          python - <<'PY'
+          import numpy as np
+          import pandas as pd
+          p='results/v1_threshold_audit.csv'; s='results/v1_threshold_audit_stability.csv'
+          d=pd.read_csv(p); st=pd.read_csv(s)
+          req={'symbol','selection_pct','n_baseline','n_selected','mean_baseline','mean_selected_gross','mean_selected_net','delta_mean_gross','ci_low','ci_high','delta_mean_net','cost_bps','status'}
+          if not req.issubset(d.columns) or d.empty: raise SystemExit('Invalid threshold audit schema')
+          if not set(d.selection_pct).issubset({10,20,30,40}): raise SystemExit('Unexpected threshold selection pct')
+          if (d.n_selected > d.n_baseline).any(): raise SystemExit('Invalid threshold counts')
+          ok=d[d.status.eq('OK')]
+          nums=['n_baseline','n_selected','mean_baseline','mean_selected_gross','mean_selected_net','delta_mean_gross','ci_low','ci_high','delta_mean_net','cost_bps']
+          if not ok.empty and not np.isfinite(ok[nums].to_numpy(float)).all(): raise SystemExit('Invalid threshold numeric result')
+          req_st={'symbol','year','selection_pct','n_baseline','n_selected','mean_baseline','mean_selected_gross','delta_mean','status'}
+          if not req_st.issubset(st.columns): raise SystemExit('Invalid threshold stability schema')
+          if (st.n_selected > st.n_baseline).any(): raise SystemExit('Invalid threshold stability counts')
+          print('V1 THRESHOLD AUDIT PASS'); print(d.to_string(index=False)); print('V1 THRESHOLD STABILITY PASS'); print(st.to_string(index=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v1-threshold-audit
+          path: |
+            market_rebound_model/results/v1_threshold_audit.csv
+            market_rebound_model/results/v1_threshold_audit_stability.csv
+          if-no-files-found: error
