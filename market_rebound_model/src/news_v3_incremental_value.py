@@ -8,7 +8,7 @@ import pandas as pd
 
 
 def prospective_filter(rows: pd.DataFrame, frac: float, direction: str, min_history: int) -> pd.DataFrame:
-    x = rows.sort_values(["Date", "symbol"]).reset_index(drop=True).copy()
+    x = rows.sort_values(["Date", "symbol", "_row_id"]).reset_index(drop=True).copy()
     x["eligible"] = False
     x["selected"] = False
     for symbol, idxs in x.groupby("symbol", sort=False).groups.items():
@@ -42,8 +42,8 @@ def bootstrap_delta(values: np.ndarray, selected: np.ndarray, n_boot: int, seed:
 
 
 def evaluate(candidates: pd.DataFrame, selected_rows: pd.DataFrame, label: str, n_boot: int, cost_bps: float) -> dict:
-    base = candidates[candidates["next_ret"].notna()]
-    selected = selected_rows[selected_rows["eligible"] & selected_rows["selected"] & selected_rows["next_ret"].notna()]
+    base = candidates[candidates["next_ret"].notna()].copy()
+    selected = selected_rows[selected_rows["eligible"] & selected_rows["selected"] & selected_rows["next_ret"].notna()].copy()
     if selected.empty:
         return {
             "set": label,
@@ -57,14 +57,12 @@ def evaluate(candidates: pd.DataFrame, selected_rows: pd.DataFrame, label: str, 
             "ci_high": np.nan,
             "cost_bps": cost_bps,
         }
+    base_ids = base["_row_id"].to_numpy()
+    selected_ids = set(selected["_row_id"].to_numpy())
+    mask = np.array([rid in selected_ids for rid in base_ids], dtype=bool)
     values = base["next_ret"].to_numpy(float)
-    mask = base.index.isin(selected.index)
-    # Align selection to the exact base rows.
-    z = candidates.loc[base.index].copy()
-    mask = z.index.isin(selected.index)
-    values = z["next_ret"].to_numpy(float)
     delta, lo, hi = bootstrap_delta(values, mask, n_boot, 42)
-    mean_sel = float(z.loc[mask, "next_ret"].mean())
+    mean_sel = float(values[mask].mean())
     return {
         "set": label,
         "n_base": len(base),
@@ -96,11 +94,10 @@ def main() -> None:
     rows["news_rank_score"] = pd.to_numeric(rows["news_rank_score"], errors="coerce")
     rows["v1_top20"] = rows["v1_top20"].fillna(False).astype(bool)
     rows = rows[rows["v1_top20"]].dropna(subset=["Date", "next_ret", "news_rank_score"]).copy()
+    rows["_row_id"] = np.arange(len(rows))
 
     reports = []
     parts = []
-    # Baseline is V1 top20 itself. News filters are pre-specified direction variants,
-    # evaluated without changing the underlying V1 candidate population.
     for symbol, g in rows.groupby("symbol", sort=True):
         base = g.copy()
         for frac, label in ((0.25, "news_top25"), (0.50, "news_top50")):
@@ -113,13 +110,14 @@ def main() -> None:
                 y["filter"] = label
                 y["direction"] = direction
                 parts.append(y)
+        mean_base = float(base["next_ret"].mean())
         reports.append({
             "set": f"{symbol}: V1 top20 baseline",
             "n_base": len(base),
             "n_selected": len(base),
-            "mean_base": float(base["next_ret"].mean()),
-            "mean_selected_gross": float(base["next_ret"].mean()),
-            "mean_selected_net": float(base["next_ret"].mean()) - args.cost_bps / 10000.0,
+            "mean_base": mean_base,
+            "mean_selected_gross": mean_base,
+            "mean_selected_net": mean_base - args.cost_bps / 10000.0,
             "delta_mean": 0.0,
             "ci_low": 0.0,
             "ci_high": 0.0,
