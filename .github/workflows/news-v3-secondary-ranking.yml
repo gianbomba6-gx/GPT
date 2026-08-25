@@ -91,7 +91,7 @@ jobs:
           test -s results/news_v3_event_walkforward_filter_rows.csv
           test -s results/news_v2_full_raw.csv
 
-      - name: Run OOS secondary ranking
+      - name: Run normal OOS secondary ranking
         run: |
           python src/news_event_secondary_ranking.py \
             results/news_v3_event_walkforward_filter_rows.csv \
@@ -100,35 +100,57 @@ jobs:
             --min-n 20 \
             --shrink-k 50
 
-      - name: Validate ranking output
+      - name: Run inverted-score direction check
+        run: |
+          python src/news_event_secondary_ranking.py \
+            results/news_v3_event_walkforward_filter_rows.csv \
+            --raw-gkg results/news_v2_full_raw.csv \
+            --out results/news_v3_secondary_ranking_inverted.csv \
+            --min-n 20 \
+            --shrink-k 50 \
+            --invert-score
+
+      - name: Validate ranking outputs
         run: |
           python - <<'PY'
           import pandas as pd
+
           report = pd.read_csv('results/news_v3_secondary_ranking.csv')
           q = pd.read_csv('results/news_v3_secondary_ranking_quartiles.csv')
           rows = pd.read_csv('results/news_v3_secondary_ranking_rows.csv')
+          inv_report = pd.read_csv('results/news_v3_secondary_ranking_inverted.csv')
+          inv_q = pd.read_csv('results/news_v3_secondary_ranking_inverted_quartiles.csv')
+          inv_rows = pd.read_csv('results/news_v3_secondary_ranking_inverted_rows.csv')
+
           required_report = {'symbol','n','spearman_score_next_ret','multi_candidate_days','rank1_days','known_event_rate'}
           required_rows = {'Date','symbol','next_ret','news_rank_score','news_daily_rank','news_daily_candidates','news_rank_known_events'}
-          if not required_report.issubset(report.columns):
-              raise SystemExit(f'Invalid report schema: {sorted(required_report - set(report.columns))}')
-          if not required_rows.issubset(rows.columns):
-              raise SystemExit(f'Invalid rows schema: {sorted(required_rows - set(rows.columns))}')
-          if rows.empty or report.empty or q.empty:
-              raise SystemExit('Secondary ranking output is empty')
-          if not rows['news_daily_rank'].ge(1).all():
-              raise SystemExit('Invalid daily ranks')
-          if not rows['news_daily_rank'].le(rows['news_daily_candidates']).all():
-              raise SystemExit('Daily rank exceeds candidate count')
-          if not (rows['news_rank_known_events'] >= 0).all():
-              raise SystemExit('Invalid known-event counts')
-          if not (rows['news_rank_known_events'] > 0).any():
-              raise SystemExit('No candidate received a known historical event score')
+          for name, d in [('normal report', report), ('inverted report', inv_report)]:
+              if not required_report.issubset(d.columns):
+                  raise SystemExit(f'Invalid {name} schema')
+          for name, d in [('normal rows', rows), ('inverted rows', inv_rows)]:
+              if not required_rows.issubset(d.columns):
+                  raise SystemExit(f'Invalid {name} schema')
+              if d.empty or not d['news_daily_rank'].ge(1).all() or not d['news_daily_rank'].le(d['news_daily_candidates']).all():
+                  raise SystemExit(f'Invalid {name} ranking')
+              if not (d['news_rank_known_events'] > 0).any():
+                  raise SystemExit(f'No known-event scores in {name}')
+
+          merged = rows[['Date','symbol','news_rank_score']].merge(
+              inv_rows[['Date','symbol','news_rank_score']], on=['Date','symbol'], suffixes=('_normal','_inverted')
+          )
+          if not (merged['news_rank_score_inverted'].eq(-merged['news_rank_score_normal'])).all():
+              raise SystemExit('Inverted score is not an exact sign flip')
+
           print('SECONDARY NEWS RANKING PASS')
+          print('NORMAL')
           print(report.to_string(index=False))
           print(q.to_string(index=False))
+          print('INVERTED')
+          print(inv_report.to_string(index=False))
+          print(inv_q.to_string(index=False))
           PY
 
-      - name: Upload ranking artifact
+      - name: Upload ranking artifacts
         uses: actions/upload-artifact@v4
         with:
           name: news-v3-secondary-ranking
@@ -136,4 +158,7 @@ jobs:
             market_rebound_model/results/news_v3_secondary_ranking.csv
             market_rebound_model/results/news_v3_secondary_ranking_quartiles.csv
             market_rebound_model/results/news_v3_secondary_ranking_rows.csv
+            market_rebound_model/results/news_v3_secondary_ranking_inverted.csv
+            market_rebound_model/results/news_v3_secondary_ranking_inverted_quartiles.csv
+            market_rebound_model/results/news_v3_secondary_ranking_inverted_rows.csv
           if-no-files-found: error
