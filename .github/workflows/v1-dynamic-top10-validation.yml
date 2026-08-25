@@ -1,0 +1,54 @@
+name: V1 dynamic top10 validation
+
+on:
+  workflow_dispatch:
+
+jobs:
+  dynamic-top10:
+    name: Walk-forward dynamic top10 validation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt pytest
+      - name: Run dynamic top10 validation
+        run: |
+          python src/v1_dynamic_top10_validation.py \
+            --out results/v1_dynamic_top10_validation.csv \
+            --out-yearly results/v1_dynamic_top10_validation_yearly.csv \
+            --n-boot 10000
+      - name: Validate dynamic top10 validation
+        run: |
+          python - <<'PY'
+          import numpy as np
+          import pandas as pd
+          p='results/v1_dynamic_top10_validation.csv'; y='results/v1_dynamic_top10_validation_yearly.csv'
+          d=pd.read_csv(p); yr=pd.read_csv(y)
+          req={'strategy','n_baseline','n_selected','selection_rate','mean_selected_gross','mean_selected_net','hit3','ci_low','ci_high','cost_bps','status'}
+          if not req.issubset(d.columns) or d.empty: raise SystemExit('Invalid dynamic top10 schema')
+          if set(d.strategy) != {'dynamic_top10'}: raise SystemExit('Unexpected dynamic strategy')
+          if (d.n_selected > d.n_baseline).any(): raise SystemExit('Invalid dynamic counts')
+          ok=d[d.status.eq('OK')]
+          nums=['n_baseline','n_selected','selection_rate','mean_selected_gross','mean_selected_net','hit3','ci_low','ci_high','cost_bps']
+          if not ok.empty and not np.isfinite(ok[nums].to_numpy(float)).all(): raise SystemExit('Invalid dynamic numeric result')
+          req_y={'year','n_train_candidates','dynamic_cutoff','n_test_candidates','n_dynamic_selected','selection_rate_dynamic'}
+          if not req_y.issubset(yr.columns) or yr.empty: raise SystemExit('Invalid dynamic yearly schema')
+          if (yr.n_dynamic_selected > yr.n_test_candidates).any(): raise SystemExit('Invalid dynamic yearly counts')
+          if not ((yr.dynamic_cutoff > 0) & (yr.dynamic_cutoff < 1)).all(): raise SystemExit('Invalid dynamic yearly cutoff')
+          print('V1 DYNAMIC TOP10 VALIDATION PASS'); print(d.to_string(index=False)); print('V1 DYNAMIC TOP10 YEARLY'); print(yr.to_string(index=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v1-dynamic-top10-validation
+          path: |
+            market_rebound_model/results/v1_dynamic_top10_validation.csv
+            market_rebound_model/results/v1_dynamic_top10_validation_yearly.csv
+          if-no-files-found: error
