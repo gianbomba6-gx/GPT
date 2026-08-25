@@ -16,3 +16,17 @@ def test_prospective_filter_uses_only_prior_scores():
     assert out.loc[0:1, "eligible"].sum() == 0
     assert bool(out.loc[2, "eligible"])
     assert bool(out.loc[2, "selected"])
+
+
+def test_equal_scores_do_not_select_every_row():
+    rows = pd.DataFrame({
+        "Date": pd.date_range("2025-01-01", periods=30),
+        "symbol": ["NVDA"] * 30,
+        "news_rank_score": [0.0] * 25 + [1.0] * 5,
+        "next_ret": [0.0] * 30,
+        "_row_id": np.arange(30),
+    })
+    out = prospective_filter(rows, frac=0.25, direction="normal", min_history=2)
+    eligible = out[out["eligible"]]
+    assert len(eligible) > 0
+    assert out["selected"].sum() < len(eligible)
