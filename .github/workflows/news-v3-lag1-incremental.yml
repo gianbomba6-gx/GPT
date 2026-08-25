@@ -1,0 +1,172 @@
+name: News V3 prior-day news test
+
+on:
+  push:
+    paths:
+      - 'market_rebound_model/src/news_event_secondary_ranking.py'
+      - 'market_rebound_model/src/news_v3_incremental_value.py'
+      - 'market_rebound_model/tests/test_news_event_secondary_ranking.py'
+      - '.github/workflows/news-v3-lag1-incremental.yml'
+  workflow_dispatch:
+
+jobs:
+  lag1-test:
+    name: Prior-day news -> next session
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+
+      - name: Run ranking tests
+        run: python -m pytest -q tests/test_news_event_secondary_ranking.py
+
+      - name: Find latest usable walk-forward artifact
+        id: wf_artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id=$(gh api -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/news-v3-event-walkforward-filter.yml/runs?status=success&per_page=20" \
+            --jq '.workflow_runs[0].id')
+          test -n "$run_id" && test "$run_id" != null
+          artifact_id=$(gh api -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name=="news-v3-event-walkforward-filter") | .id' | head -n1)
+          test -n "$artifact_id"
+          echo "artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
+
+      - name: Find latest historical artifact with raw GKG
+        id: hist_artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id=$(gh api -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/news-v2-historical-backfill.yml/runs?status=success&per_page=20" \
+            --jq '.workflow_runs[0].id')
+          test -n "$run_id" && test "$run_id" != null
+          artifact_id=$(gh api -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name=="news-v3-event-aware-historical-final") | .id' | head -n1)
+          test -n "$artifact_id"
+          echo "artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
+
+      - name: Download ranking input
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WF_ARTIFACT_ID: ${{ steps.wf_artifact.outputs.artifact_id }}
+          HIST_ARTIFACT_ID: ${{ steps.hist_artifact.outputs.artifact_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p results/imported/wf results/imported/hist
+          gh api -H 'Accept: application/vnd.github+json' "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${WF_ARTIFACT_ID}/zip" > /tmp/ranking.zip
+          gh api -H 'Accept: application/vnd.github+json' "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${HIST_ARTIFACT_ID}/zip" > /tmp/history.zip
+          unzip -q /tmp/ranking.zip -d results/imported/wf
+          unzip -q /tmp/history.zip -d results/imported/hist
+          rows=$(find results/imported/wf -type f -name 'news_v3_event_walkforward_filter_rows.csv' -print -quit)
+          raw=$(find results/imported/hist -type f -name 'news_v2_full_raw.csv' -print -quit)
+          test -n "$rows"
+          test -n "$raw"
+          cp "$rows" results/news_v3_event_walkforward_filter_rows.csv
+          cp "$raw" results/news_v2_full_raw.csv
+          test -s results/news_v3_event_walkforward_filter_rows.csv
+          test -s results/news_v2_full_raw.csv
+
+      - name: Build prior-day normal score
+        run: |
+          python src/news_event_secondary_ranking.py \
+            results/news_v3_event_walkforward_filter_rows.csv \
+            --raw-gkg results/news_v2_full_raw.csv \
+            --out results/news_v3_secondary_ranking_lag1.csv \
+            --min-n 20 \
+            --shrink-k 50 \
+            --event-lag-days 1
+
+      - name: Build prior-day inverted score
+        run: |
+          python src/news_event_secondary_ranking.py \
+            results/news_v3_event_walkforward_filter_rows.csv \
+            --raw-gkg results/news_v2_full_raw.csv \
+            --out results/news_v3_secondary_ranking_lag1_inverted.csv \
+            --min-n 20 \
+            --shrink-k 50 \
+            --invert-score \
+            --event-lag-days 1
+
+      - name: Validate lagged ranking
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          normal = pd.read_csv('results/news_v3_secondary_ranking_lag1_rows.csv')
+          inverted = pd.read_csv('results/news_v3_secondary_ranking_lag1_inverted_rows.csv')
+          required = {'Date','symbol','next_ret','news_rank_score','news_rank_known_events','news_daily_rank','news_daily_candidates'}
+          if not required.issubset(normal.columns) or not required.issubset(inverted.columns):
+              raise SystemExit('Invalid lag1 ranking schema')
+          if normal.empty or inverted.empty:
+              raise SystemExit('Empty lag1 ranking output')
+          merged = normal[['Date','symbol','news_rank_score']].merge(
+              inverted[['Date','symbol','news_rank_score']], on=['Date','symbol'], suffixes=('_normal','_inverted')
+          )
+          if not merged['news_rank_score_inverted'].eq(-merged['news_rank_score_normal']).all():
+              raise SystemExit('Lag1 inverted score is not an exact sign flip')
+          print('LAG1 RANKING PASS')
+          print('Rows:', len(normal))
+          print('Known-event rows:', int((normal['news_rank_known_events'] > 0).sum()))
+          PY
+
+      - name: Run lag1 incremental value
+        run: |
+          python src/news_v3_incremental_value.py \
+            results/news_v3_secondary_ranking_lag1_rows.csv \
+            --out results/news_v3_lag1_incremental_value.csv \
+            --out-rows results/news_v3_lag1_incremental_value_rows.csv \
+            --n-boot 10000 \
+            --min-history 20 \
+            --cost-bps 20
+
+      - name: Validate lag1 incremental value
+        run: |
+          python - <<'PY'
+          import numpy as np
+          import pandas as pd
+          iv = pd.read_csv('results/news_v3_lag1_incremental_value.csv')
+          required = {'set','n_base','n_eligible','n_selected','mean_base','mean_selected_gross','mean_selected_net','delta_mean','ci_low','ci_high','cost_bps','status'}
+          if not required.issubset(iv.columns) or iv.empty:
+              raise SystemExit('Invalid lag1 incremental schema')
+          for _, row in iv.iterrows():
+              vals = [row.n_base, row.n_eligible, row.n_selected, row.mean_base, row.mean_selected_gross, row.mean_selected_net, row.delta_mean, row.ci_low, row.ci_high, row.cost_bps]
+              if not all(np.isfinite(vals)) or row.n_base <= 0 or row.n_selected < 0 or row.n_selected > row.n_base or row.ci_low > row.ci_high:
+                  raise SystemExit('Invalid lag1 incremental result')
+          print('NEWS V3 LAG1 INCREMENTAL VALUE PASS')
+          print(iv.to_string(index=False))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: news-v3-lag1-prior-day-test
+          path: |
+            market_rebound_model/results/news_v3_secondary_ranking_lag1.csv
+            market_rebound_model/results/news_v3_secondary_ranking_lag1_quartiles.csv
+            market_rebound_model/results/news_v3_secondary_ranking_lag1_rows.csv
+            market_rebound_model/results/news_v3_secondary_ranking_lag1_inverted.csv
+            market_rebound_model/results/news_v3_secondary_ranking_lag1_inverted_quartiles.csv
+            market_rebound_model/results/news_v3_secondary_ranking_lag1_inverted_rows.csv
+            market_rebound_model/results/news_v3_lag1_incremental_value.csv
+            market_rebound_model/results/news_v3_lag1_incremental_value_rows.csv
+          if-no-files-found: error
