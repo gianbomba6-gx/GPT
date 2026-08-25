@@ -85,3 +85,21 @@ def test_raw_gkg_reconstructs_negative_event_share():
     out = score_oos(rows, raw=raw, min_n=2, shrink_k=0)
     assert out.iloc[-1]["news_rank_known_events"] == 1
     assert out.iloc[-1]["news_rank_score"] < 0
+
+
+def test_lag_one_uses_previous_calendar_day_news_and_keeps_after_close_news():
+    rows = pd.DataFrame([
+        {"Date": "2026-01-01", "symbol": "TSLA", "next_ret": -0.08, "v1_top20": True},
+        {"Date": "2026-01-02", "symbol": "TSLA", "next_ret": 0.04, "v1_top20": True},
+        {"Date": "2026-01-03", "symbol": "TSLA", "next_ret": -0.08, "v1_top20": True},
+        {"Date": "2026-02-01", "symbol": "TSLA", "next_ret": 0.02, "v1_top20": True},
+    ])
+    raw = pd.DataFrame([
+        {"candidate_day": "2026-01-01", "published_at": "2026-01-01T23:30:00Z", "symbol": "TSLA", "headline": "product decline news", "url": "https://example.com", "summary": "product decline"},
+        {"candidate_day": "2026-01-02", "published_at": "2026-01-02T15:00:00Z", "symbol": "TSLA", "headline": "routine company update", "url": "https://example.com", "summary": "routine company update"},
+        {"candidate_day": "2026-01-03", "published_at": "2026-01-03T15:00:00Z", "symbol": "TSLA", "headline": "product decline news", "url": "https://example.com", "summary": "product decline"},
+        {"candidate_day": "2026-02-01", "published_at": "2026-02-01T15:00:00Z", "symbol": "TSLA", "headline": "product decline news", "url": "https://example.com", "summary": "product decline"},
+    ])
+    lagged = score_oos(rows, raw=raw, min_n=2, shrink_k=0, event_lag_days=1)
+    assert lagged.iloc[1]["news_rank_known_events"] >= 0
+    assert lagged.iloc[1]["negative_event_product_share"] > 0
