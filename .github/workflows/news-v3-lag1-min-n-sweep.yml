@@ -1,0 +1,128 @@
+name: News V3 lag1 min-n sweep
+
+on:
+  push:
+    paths:
+      - 'market_rebound_model/src/news_v3_lag1_min_n_sweep.py'
+      - '.github/workflows/news-v3-lag1-min-n-sweep.yml'
+  workflow_dispatch:
+
+jobs:
+  sweep:
+    name: Lag1 min-n sweep
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+
+      - name: Find latest usable walk-forward artifact
+        id: wf_artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id=$(gh api -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/news-v3-event-walkforward-filter.yml/runs?status=success&per_page=20" \
+            --jq '.workflow_runs[0].id')
+          test -n "$run_id" && test "$run_id" != null
+          artifact_id=$(gh api -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name=="news-v3-event-walkforward-filter") | .id' | head -n1)
+          test -n "$artifact_id"
+          echo "artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
+
+      - name: Find latest historical artifact with raw GKG
+        id: hist_artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id=$(gh api -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/news-v2-historical-backfill.yml/runs?status=success&per_page=20" \
+            --jq '.workflow_runs[0].id')
+          test -n "$run_id" && test "$run_id" != null
+          artifact_id=$(gh api -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name=="news-v3-event-aware-historical-final") | .id' | head -n1)
+          test -n "$artifact_id"
+          echo "artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
+
+      - name: Download ranking input
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WF_ARTIFACT_ID: ${{ steps.wf_artifact.outputs.artifact_id }}
+          HIST_ARTIFACT_ID: ${{ steps.hist_artifact.outputs.artifact_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p results/imported/wf results/imported/hist
+          gh api -H 'Accept: application/vnd.github+json' "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${WF_ARTIFACT_ID}/zip" > /tmp/ranking.zip
+          gh api -H 'Accept: application/vnd.github+json' "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${HIST_ARTIFACT_ID}/zip" > /tmp/history.zip
+          unzip -q /tmp/ranking.zip -d results/imported/wf
+          unzip -q /tmp/history.zip -d results/imported/hist
+          rows=$(find results/imported/wf -type f -name 'news_v3_event_walkforward_filter_rows.csv' -print -quit)
+          raw=$(find results/imported/hist -type f -name 'news_v2_full_raw.csv' -print -quit)
+          test -n "$rows"
+          test -n "$raw"
+          cp "$rows" results/news_v3_event_walkforward_filter_rows.csv
+          cp "$raw" results/news_v2_full_raw.csv
+          test -s results/news_v3_event_walkforward_filter_rows.csv
+          test -s results/news_v2_full_raw.csv
+
+      - name: Run lag1 min-n sweep
+        run: |
+          python src/news_v3_lag1_min_n_sweep.py \
+            results/news_v3_event_walkforward_filter_rows.csv \
+            results/news_v2_full_raw.csv \
+            --min-ns 5,10,15,20 \
+            --out results/news_v3_lag1_min_n_sweep.csv \
+            --out-stability results/news_v3_lag1_min_n_sweep_stability.csv \
+            --cost-bps 20
+
+      - name: Validate lag1 min-n sweep
+        run: |
+          python - <<'PY'
+          import numpy as np
+          import pandas as pd
+          sweep = pd.read_csv('results/news_v3_lag1_min_n_sweep.csv')
+          stability = pd.read_csv('results/news_v3_lag1_min_n_sweep_stability.csv')
+          expected = {5, 10, 15, 20}
+          if set(sweep['min_n'].unique()) != expected:
+              raise SystemExit('Unexpected min-n values')
+          required = {'min_n','symbol','filter','n_base','n_news_candidates','n_eligible','n_selected','mean_base','mean_selected_gross','mean_selected_net','delta_mean','ci_low','ci_high','cost_bps','status'}
+          if not required.issubset(sweep.columns) or sweep.empty:
+              raise SystemExit('Invalid sweep schema')
+          if (sweep['n_selected'] > sweep['n_base']).any() or (sweep['n_selected'] < 0).any():
+              raise SystemExit('Invalid sweep counts')
+          numeric = ['mean_base','mean_selected_gross','mean_selected_net','delta_mean','ci_low','ci_high','cost_bps']
+          if not np.isfinite(sweep[numeric].to_numpy(dtype=float)).all():
+              raise SystemExit('Non-finite sweep result')
+          if not stability.empty and (stability['n_selected'] > stability['n_eligible']).any():
+              raise SystemExit('Invalid stability counts')
+          print('NEWS V3 LAG1 MIN-N SWEEP PASS')
+          print(sweep.to_string(index=False))
+          print('NEWS V3 LAG1 MIN-N STABILITY')
+          print(stability.to_string(index=False))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: news-v3-lag1-min-n-sweep
+          path: |
+            market_rebound_model/results/news_v3_lag1_min_n_sweep.csv
+            market_rebound_model/results/news_v3_lag1_min_n_sweep_stability.csv
+          if-no-files-found: error
