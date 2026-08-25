@@ -1,0 +1,107 @@
+name: News V3 secondary ranking bootstrap
+
+on:
+  push:
+    paths:
+      - 'market_rebound_model/src/news_v3_secondary_ranking_bootstrap.py'
+      - 'market_rebound_model/tests/test_news_v3_secondary_ranking_bootstrap.py'
+      - '.github/workflows/news-v3-secondary-ranking-bootstrap.yml'
+  workflow_dispatch:
+
+jobs:
+  bootstrap:
+    name: OOS secondary ranking bootstrap
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+
+      - name: Run bootstrap tests
+        run: python -m pytest -q tests/test_news_v3_secondary_ranking_bootstrap.py
+
+      - name: Find latest successful secondary ranking artifact
+        id: artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id=$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/news-v3-secondary-ranking.yml/runs?status=success&per_page=20" \
+            --jq '.workflow_runs[0].id')
+          test -n "$run_id" && test "$run_id" != "null"
+          artifact_id=$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name=="news-v3-secondary-ranking") | .id' | head -n1)
+          test -n "$artifact_id"
+          echo "artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
+
+      - name: Download inverted ranking rows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.artifact.outputs.artifact_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p results/imported
+          gh api -H 'Accept: application/vnd.github+json' "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" > /tmp/ranking.zip
+          unzip -q /tmp/ranking.zip -d results/imported
+          rows=$(find results/imported -type f -name 'news_v3_secondary_ranking_inverted_rows.csv' -print -quit)
+          test -n "$rows"
+          cp "$rows" results/news_v3_secondary_ranking_inverted_rows.csv
+          test -s results/news_v3_secondary_ranking_inverted_rows.csv
+
+      - name: Run OOS bootstrap
+        run: |
+          python src/news_v3_secondary_ranking_bootstrap.py \
+            results/news_v3_secondary_ranking_inverted_rows.csv \
+            --out results/news_v3_secondary_ranking_bootstrap.csv \
+            --n-boot 10000
+
+      - name: Validate bootstrap
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          report = pd.read_csv('results/news_v3_secondary_ranking_bootstrap.csv')
+          q = pd.read_csv('results/news_v3_secondary_ranking_bootstrap_quartiles.csv')
+          required = {'symbol','n_q1','n_q4','delta_q4_q1','ci_low','ci_high','spearman','spearman_ci_low','spearman_ci_high'}
+          if not required.issubset(report.columns):
+              raise SystemExit(f'Invalid bootstrap schema: {sorted(required - set(report.columns))}')
+          if report.empty or q.empty:
+              raise SystemExit('Empty secondary ranking bootstrap output')
+          all_row = report[report['symbol'] == 'ALL']
+          if len(all_row) != 1:
+              raise SystemExit('Missing ALL bootstrap row')
+          r = all_row.iloc[0]
+          if not (r['ci_low'] <= r['delta_q4_q1'] <= r['ci_high']):
+              raise SystemExit('Invalid Q4-Q1 confidence interval')
+          if not (r['spearman_ci_low'] <= r['spearman'] <= r['spearman_ci_high']):
+              raise SystemExit('Invalid Spearman confidence interval')
+          print('SECONDARY NEWS BOOTSTRAP PASS')
+          print(report.to_string(index=False))
+          print(q.to_string(index=False))
+          PY
+
+      - name: Upload bootstrap artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: news-v3-secondary-ranking-bootstrap
+          path: |
+            market_rebound_model/results/news_v3_secondary_ranking_bootstrap.csv
+            market_rebound_model/results/news_v3_secondary_ranking_bootstrap_quartiles.csv
+          if-no-files-found: error
