@@ -30,6 +30,8 @@ def score_one_event_type(rows: pd.DataFrame, raw: pd.DataFrame, event_type: str,
 
     events = _event_features_lagged(raw, 1, x[["Date", "symbol"]])
     col = f"negative_event_{event_type}_share"
+    # A type absent from the current raw sample is a legitimate zero-feature case,
+    # not a schema error. Create the column explicitly before selecting it.
     if col not in events.columns:
         events[col] = 0.0
     events = events[["Date", "symbol", col]]
