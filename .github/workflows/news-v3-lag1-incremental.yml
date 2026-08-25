@@ -176,7 +176,9 @@ jobs:
               raise SystemExit('Invalid lag1 stability filter')
           if not st['n_selected'].ge(0).all() or not st['n_selected'].le(st['n_eligible']).all():
               raise SystemExit('Invalid lag1 stability counts')
-          if st['status'].eq('OK').any() and not st.loc[st['status'].eq('OK'), ['mean_base','mean_selected_gross','delta_mean']].applymap(lambda v: pd.notna(v) and pd.api.types.is_number(v)).all().all():
+          ok = st[st['status'].eq('OK')][['mean_base','mean_selected_gross','delta_mean']]
+          numeric = ok.apply(pd.to_numeric, errors='coerce')
+          if not numeric.notna().all().all():
               raise SystemExit('Invalid lag1 stability values')
           print('NEWS V3 LAG1 STABILITY PASS')
           print(st.to_string(index=False))
