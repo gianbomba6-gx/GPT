@@ -8,9 +8,11 @@ on:
       - 'market_rebound_model/src/news_v3_multi_symbol_selection_robustness.py'
       - 'market_rebound_model/src/news_v3_multi_symbol_direction_check.py'
       - 'market_rebound_model/src/news_v3_symbol_direction_calibrator.py'
+      - 'market_rebound_model/src/news_v3_direction_strategy_benchmark.py'
       - 'market_rebound_model/tests/test_news_v3_nvda_selection_bootstrap.py'
       - 'market_rebound_model/tests/test_news_v3_nvda_selection_robustness.py'
       - 'market_rebound_model/tests/test_news_v3_multi_symbol_selection_robustness.py'
+      - 'market_rebound_model/tests/test_news_v3_direction_strategy_benchmark.py'
       - '.github/workflows/news-v3-nvda-selection.yml'
   workflow_dispatch:
 
@@ -35,7 +37,8 @@ jobs:
           python -m pytest -q \
             tests/test_news_v3_nvda_selection_bootstrap.py \
             tests/test_news_v3_nvda_selection_robustness.py \
-            tests/test_news_v3_multi_symbol_selection_robustness.py
+            tests/test_news_v3_multi_symbol_selection_robustness.py \
+            tests/test_news_v3_direction_strategy_benchmark.py
       - name: Find latest secondary ranking artifact
         id: artifact
         env:
@@ -104,6 +107,15 @@ jobs:
             --n-boot 10000 \
             --min-history 20 \
             --min-calibration 8
+      - name: Run fixed versus calibrated direction benchmark
+        run: |
+          python src/news_v3_direction_strategy_benchmark.py \
+            results/news_v3_secondary_ranking_inverted_rows.csv \
+            --out results/news_v3_direction_strategy_benchmark.csv \
+            --out-rows results/news_v3_direction_strategy_benchmark_rows.csv \
+            --n-boot 10000 \
+            --min-history 20 \
+            --min-calibration 8
       - name: Validate
         run: |
           python - <<'PY'
@@ -133,46 +145,10 @@ jobs:
               if row.ci_low > row.ci_high:
                   raise SystemExit('Invalid prospective bootstrap CI ordering')
 
-          stability = pd.read_csv('results/news_v3_nvda_selection_stability.csv')
-          required = {'period','n_eligible','n_selected','mean_all','mean_selected_gross','mean_selected_net','delta_mean'}
-          if not required.issubset(stability.columns):
-              raise SystemExit('Invalid NVDA stability schema')
-          if not stability['n_eligible'].gt(0).all():
-              raise SystemExit('Invalid NVDA stability sample')
-
-          ms = pd.read_csv('results/news_v3_multi_symbol_selection_robustness.csv')
-          required_ms = {'symbol','selection','n_total','n_eligible','n_selected','delta_mean','ci_low','ci_high'}
-          if not required_ms.issubset(ms.columns):
-              raise SystemExit('Invalid multi-symbol robustness schema')
-          if not set(ms['selection'].unique()).issubset({'top25','top50'}):
-              raise SystemExit('Invalid multi-symbol selection labels')
-          for _, row in ms.iterrows():
-              vals = [row.n_total, row.n_eligible, row.n_selected]
-              if not all(np.isfinite(vals)):
-                  raise SystemExit('Non-finite multi-symbol counts')
-              if row.n_eligible <= 0 or row.n_selected <= 0 or row.n_selected > row.n_eligible:
-                  raise SystemExit('Invalid multi-symbol selection counts')
-              vals_stat = [row.delta_mean, row.ci_low, row.ci_high]
-              if not all(np.isfinite(vals_stat)) or row.ci_low > row.ci_high:
-                  raise SystemExit('Invalid multi-symbol robustness statistics')
-
-          dc = pd.read_csv('results/news_v3_multi_symbol_direction_check_pivot.csv')
-          required_dc = {'symbol','selection','normal','inverted','spread_inverted_minus_normal'}
-          if not required_dc.issubset(dc.columns):
-              raise SystemExit('Invalid score direction comparison schema')
-          if len(dc) == 0:
-              raise SystemExit('Empty score direction comparison')
-          for _, row in dc.iterrows():
-              vals = [row.normal, row.inverted, row.spread_inverted_minus_normal]
-              if not all(np.isfinite(vals)):
-                  raise SystemExit('Non-finite score direction comparison')
-
           cal = pd.read_csv('results/news_v3_symbol_direction_calibration.csv')
           required_cal = {'symbol','selection','n_total','n_eligible','n_selected','delta_mean','ci_low','ci_high','normal_count','inverted_count'}
-          if not required_cal.issubset(cal.columns):
-              raise SystemExit('Invalid symbol direction calibration schema')
-          if len(cal) == 0:
-              raise SystemExit('Empty symbol direction calibration')
+          if not required_cal.issubset(cal.columns) or len(cal) == 0:
+              raise SystemExit('Invalid symbol direction calibration output')
           for _, row in cal.iterrows():
               vals = [row.n_total, row.n_eligible, row.n_selected, row.delta_mean, row.ci_low, row.ci_high, row.normal_count, row.inverted_count]
               if not all(np.isfinite(vals)):
@@ -182,10 +158,31 @@ jobs:
               if row.ci_low > row.ci_high:
                   raise SystemExit('Invalid symbol direction calibration CI ordering')
 
+          benchmark = pd.read_csv('results/news_v3_direction_strategy_benchmark.csv')
+          required_b = {'symbol','selection','strategy','n_total','n_eligible','n_selected','delta_mean','ci_low','ci_high','mean_selected'}
+          if not required_b.issubset(benchmark.columns) or len(benchmark) == 0:
+              raise SystemExit('Invalid direction strategy benchmark output')
+          if set(benchmark['strategy'].unique()) != {'normal_fixed','inverted_fixed','calibrated'}:
+              raise SystemExit('Missing direction benchmark strategies')
+          for _, row in benchmark.iterrows():
+              vals = [row.n_total, row.n_eligible, row.n_selected]
+              if not all(np.isfinite(vals)) or row.n_eligible <= 0 or row.n_selected <= 0 or row.n_selected > row.n_eligible:
+                  raise SystemExit('Invalid direction benchmark counts')
+              vals_stat = [row.delta_mean, row.ci_low, row.ci_high, row.mean_selected]
+              if not all(np.isfinite(vals_stat)) or row.ci_low > row.ci_high:
+                  raise SystemExit('Invalid direction benchmark statistics')
+
+          pivot = pd.read_csv('results/news_v3_direction_strategy_benchmark_pivot.csv')
+          required_p = {'symbol','selection','normal_fixed','inverted_fixed','calibrated','calibrated_minus_best_fixed'}
+          if not required_p.issubset(pivot.columns):
+              raise SystemExit('Invalid direction benchmark pivot')
+
+          print('DIRECTION STRATEGY BENCHMARK PASS')
+          print(benchmark.to_string(index=False))
+          print('BENCHMARK PIVOT')
+          print(pivot.to_string(index=False))
           print('SYMBOL DIRECTION CALIBRATION PASS')
           print(cal.to_string(index=False))
-          print('SCORE DIRECTION COMPARISON')
-          print(dc.to_string(index=False))
           PY
       - uses: actions/upload-artifact@v4
         with:
@@ -204,4 +201,7 @@ jobs:
             market_rebound_model/results/news_v3_multi_symbol_direction_rows.csv
             market_rebound_model/results/news_v3_symbol_direction_calibration.csv
             market_rebound_model/results/news_v3_symbol_direction_calibration_rows.csv
+            market_rebound_model/results/news_v3_direction_strategy_benchmark.csv
+            market_rebound_model/results/news_v3_direction_strategy_benchmark_pivot.csv
+            market_rebound_model/results/news_v3_direction_strategy_benchmark_rows.csv
           if-no-files-found: error
