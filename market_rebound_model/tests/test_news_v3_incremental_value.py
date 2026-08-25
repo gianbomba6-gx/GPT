@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from src.news_v3_incremental_value import prospective_filter
+from src.news_v3_incremental_value import evaluate, prospective_filter
 
 
 def test_prospective_filter_uses_only_prior_scores():
@@ -30,3 +30,20 @@ def test_equal_scores_do_not_select_every_row():
     eligible = out[out["eligible"]]
     assert len(eligible) > 0
     assert out["selected"].sum() < len(eligible)
+
+
+def test_evaluate_preserves_baseline_row_alignment():
+    base = pd.DataFrame({
+        "_row_id": np.arange(5),
+        "next_ret": [0.00, 0.01, 0.02, 0.03, 0.04],
+    })
+    selected = base[base["_row_id"].isin([2, 4])].copy()
+    selected["eligible"] = True
+    selected["selected"] = True
+    result = evaluate(base, selected, "test", n_boot=100, cost_bps=20.0)
+    assert result["n_selected"] == 2
+    assert np.isfinite(result["mean_selected_gross"])
+    assert np.isfinite(result["delta_mean"])
+    assert np.isfinite(result["ci_low"])
+    assert np.isfinite(result["ci_high"])
+    assert result["status"] == "OK"
