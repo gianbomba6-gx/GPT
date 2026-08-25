@@ -11,7 +11,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from news_event_walkforward_filter import _event_features
+try:
+    from .news_event_walkforward_filter import _event_features
+except ImportError:
+    from news_event_walkforward_filter import _event_features
 
 EVENT_TYPES = (
     "earnings",
