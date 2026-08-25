@@ -13,7 +13,7 @@ def test_prospective_selection_uses_only_prior_history():
     out = prospective_selection(rows, frac=0.5, min_history=2)
     assert out.loc[0:1, "eligible"].sum() == 0
     assert out.loc[2:, "eligible"].all()
-    assert out.loc[2, "selected"] is True
+    assert bool(out.loc[2, "selected"]) is True
 
 
 def test_bootstrap_delta_is_finite_and_ordered():
