@@ -9,13 +9,12 @@ import pandas as pd
 
 def _rank_subset(s: pd.DataFrame, frac: float) -> pd.DataFrame:
     s = s.sort_values(["Date", "news_rank_score"], ascending=[True, False]).copy()
-    # Select the top fraction only on days with multiple V1 candidates.
+    # Select the top fraction within each day. A day with one candidate
+    # selects that candidate; otherwise at least one candidate is selected.
     keep = np.zeros(len(s), dtype=bool)
     for _, idx in s.groupby("Date", sort=False).groups.items():
         positions = list(idx)
         n = len(positions)
-        if n <= 1:
-            continue
         k = max(1, int(np.ceil(n * frac)))
         top_idx = positions[:k]
         keep[s.index.get_indexer(top_idx)] = True
@@ -48,6 +47,8 @@ def bootstrap_selection(rows: pd.DataFrame, frac: float, n_boot: int = 10000, se
         else:
             boot[i] = float(sv[ss].mean() - sv.mean())
     boot = boot[np.isfinite(boot)]
+    if boot.size == 0:
+        return {"n_all": n_all, "n_selected": n_selected, "delta_mean": observed, "ci_low": np.nan, "ci_high": np.nan}
     lo, hi = np.quantile(boot, [0.025, 0.975])
     return {"n_all": n_all, "n_selected": n_selected, "delta_mean": observed, "ci_low": float(lo), "ci_high": float(hi)}
 
