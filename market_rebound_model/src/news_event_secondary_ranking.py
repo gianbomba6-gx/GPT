@@ -29,13 +29,18 @@ MIN_N = 20
 SHRINK_K = 50.0
 
 
-def _event_features_lagged(raw: pd.DataFrame, lag_days: int) -> pd.DataFrame:
-    """Build event shares for a future candidate day using prior calendar-day news.
+def _event_features_lagged(
+    raw: pd.DataFrame,
+    lag_days: int,
+    target_calendar: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Build event shares for a future candidate session using prior news sessions.
 
-    For lagged mode we deliberately include all news on the source day, including
-    items published after that day's market close, because those items are
-    available before the following trading session. The resulting feature day is
-    source candidate_day + lag_days.
+    For lagged mode we deliberately include all news on the source calendar day,
+    including items published after that day's market close, because those items
+    are available before the following trading session.  The source day is mapped
+    to the *next available market session* for each symbol, rather than adding a
+    calendar day.  This makes Friday -> Monday work correctly.
     """
     if lag_days <= 0:
         return _event_features(raw)
@@ -43,6 +48,9 @@ def _event_features_lagged(raw: pd.DataFrame, lag_days: int) -> pd.DataFrame:
     missing = required - set(raw.columns)
     if missing:
         raise ValueError(f"Missing raw columns: {sorted(missing)}")
+    if target_calendar is None:
+        raise ValueError("target_calendar is required for lagged event features")
+
     x = raw.copy()
     x["symbol"] = x["symbol"].astype(str).str.upper().str.strip()
     x["published_at"] = pd.to_datetime(x["published_at"], utc=True, errors="coerce")
@@ -50,8 +58,33 @@ def _event_features_lagged(raw: pd.DataFrame, lag_days: int) -> pd.DataFrame:
     x = x.dropna(subset=["published_at", "candidate_day", "symbol"]).copy()
     if x.empty:
         return pd.DataFrame(columns=["Date", "symbol", "news_count", *[f"event_{e}_share" for e in EVENT_TYPES], *[f"negative_event_{e}_share" for e in EVENT_TYPES]])
+
     x = add_event_features_safe(x)
-    x["feature_day"] = x["candidate_day"] + pd.to_timedelta(lag_days, unit="D")
+    cal = target_calendar.copy()
+    cal["symbol"] = cal["symbol"].astype(str).str.upper().str.strip()
+    cal["Date"] = pd.to_datetime(cal["Date"], errors="coerce").dt.normalize()
+    cal = cal.dropna(subset=["Date", "symbol"]).drop_duplicates(["Date", "symbol"])
+
+    target_maps: dict[str, np.ndarray] = {}
+    for symbol, s in cal.groupby("symbol", sort=False):
+        target_maps[str(symbol)] = np.sort(s["Date"].unique())
+
+    def map_source_day(symbol: str, source_day: pd.Timestamp) -> pd.Timestamp | pd.NaT:
+        targets = target_maps.get(str(symbol))
+        if targets is None or len(targets) == 0:
+            return pd.NaT
+        pos = int(np.searchsorted(targets, np.datetime64(source_day), side="right"))
+        target_pos = pos + lag_days - 1
+        if target_pos < 0 or target_pos >= len(targets):
+            return pd.NaT
+        return pd.Timestamp(targets[target_pos])
+
+    x["feature_day"] = [
+        map_source_day(symbol, day)
+        for symbol, day in zip(x["symbol"], x["candidate_day"])
+    ]
+    x = x.dropna(subset=["feature_day"]).copy()
+
     keys = ["feature_day", "symbol"]
     base = x.groupby(keys, as_index=False).agg(news_count=("event_type", "size"))
     counts = pd.crosstab([x["feature_day"], x["symbol"]], x["event_type"]).reset_index()
@@ -134,7 +167,7 @@ def score_oos(
     x = x.dropna(subset=["Date", "symbol"]).sort_values(["Date", "symbol"]).reset_index(drop=True)
 
     if raw is not None:
-        events = _event_features_lagged(raw, event_lag_days)
+        events = _event_features_lagged(raw, event_lag_days, target_calendar=x[["Date", "symbol"]])
         event_cols = ["Date", "symbol", *[f"negative_event_{e}_share" for e in EVENT_TYPES]]
         events = events[[c for c in event_cols if c in events.columns]]
         x = x.drop(columns=[c for c in event_cols if c not in {"Date", "symbol"}], errors="ignore")
