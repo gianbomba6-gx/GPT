@@ -29,16 +29,26 @@ MIN_N = 20
 SHRINK_K = 50.0
 
 
-def _event_score_rules(prior: pd.DataFrame, min_n: int = MIN_N, shrink_k: float = SHRINK_K) -> dict[tuple[str, str], float]:
+def _event_score_rules(
+    event_history: pd.DataFrame,
+    baseline_history: pd.DataFrame,
+    min_n: int = MIN_N,
+    shrink_k: float = SHRINK_K,
+) -> dict[tuple[str, str], float]:
+    """Learn event deltas against the full prior-candidate baseline.
+
+    ``event_history`` is long-form and contains only candidate rows carrying a
+    given event. ``baseline_history`` contains every prior V1 top20 candidate.
+    Keeping these separate is essential: otherwise the event mean and baseline
+    mean would be computed from the same rows and the score would collapse to 0.
+    """
     rules: dict[tuple[str, str], float] = {}
-    for (symbol, event), s in prior.groupby(["symbol", "event_type"], sort=False):
-        if len(s) < min_n:
-            continue
+    for (symbol, event), s in event_history.groupby(["symbol", "event_type"], sort=False):
         q = s["next_ret"].dropna()
         if len(q) < min_n:
             continue
-        baseline = prior.loc[prior["symbol"] == symbol, "next_ret"].dropna()
-        if baseline.empty:
+        baseline = baseline_history.loc[baseline_history["symbol"] == symbol, "next_ret"].dropna()
+        if len(baseline) < min_n:
             continue
         delta = float(q.mean() - baseline.mean())
         shrink = len(q) / (len(q) + shrink_k)
@@ -108,8 +118,16 @@ def score_oos(
                 part = prior.loc[mask, ["symbol", "next_ret"]].copy()
                 part["event_type"] = event
                 long_parts.append(part)
-        long = pd.concat(long_parts, ignore_index=True) if long_parts else pd.DataFrame(columns=["symbol", "next_ret", "event_type"])
-        rules = _event_score_rules(long, min_n=min_n, shrink_k=shrink_k) if not long.empty else {}
+        event_history = (
+            pd.concat(long_parts, ignore_index=True)
+            if long_parts
+            else pd.DataFrame(columns=["symbol", "next_ret", "event_type"])
+        )
+        rules = (
+            _event_score_rules(event_history, prior, min_n=min_n, shrink_k=shrink_k)
+            if not event_history.empty
+            else {}
+        )
 
         test["news_rank_score"] = test.apply(lambda r: _score_row(r, rules), axis=1)
         test["news_rank_known_events"] = test.apply(
