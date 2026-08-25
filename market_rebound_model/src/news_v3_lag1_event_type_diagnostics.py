@@ -7,49 +7,34 @@ import numpy as np
 import pandas as pd
 
 try:
-    from .news_event_secondary_ranking import (
-        EVENT_TYPES,
-        _event_features_lagged,
-        _event_score_rules,
-    )
+    from .news_event_secondary_ranking import EVENT_TYPES, _event_features_lagged, _event_score_rules
+    from .news_v3_incremental_value import bootstrap_delta, prospective_filter
 except ImportError:
-    from news_event_secondary_ranking import (
-        EVENT_TYPES,
-        _event_features_lagged,
-        _event_score_rules,
-    )
+    from news_event_secondary_ranking import EVENT_TYPES, _event_features_lagged, _event_score_rules
+    from news_v3_incremental_value import bootstrap_delta, prospective_filter
 
 
-def score_one_event_type(rows: pd.DataFrame, raw: pd.DataFrame, event_type: str, min_n: int, shrink_k: float) -> pd.DataFrame:
+def score_one_event_type(rows, raw, event_type, min_n, shrink_k):
     x = rows.copy()
     x["Date"] = pd.to_datetime(x["Date"], errors="coerce").dt.normalize()
     x["symbol"] = x["symbol"].astype(str).str.upper().str.strip()
     x["next_ret"] = pd.to_numeric(x["next_ret"], errors="coerce")
     x["v1_top20"] = x["v1_top20"].fillna(False).astype(bool)
-    x = x.dropna(subset=["Date", "symbol"]).sort_values(["Date", "symbol"]).reset_index(drop=True)
+    x = x.dropna(subset=["Date", "symbol"]).sort_values(["Date", "symbol", "_row_id"]).reset_index(drop=True)
 
-    events = _event_features_lagged(raw, 1, x[["Date", "symbol"]])
     col = f"negative_event_{event_type}_share"
+    events = _event_features_lagged(raw, 1, x[["Date", "symbol"]]).copy()
     if col not in events.columns:
         events[col] = 0.0
-    events = events[["Date", "symbol", col]].copy()
-
-    # rows may already contain the same feature column; drop it before merge
-    # so pandas cannot create _x/_y suffixes and hide the canonical column.
-    x = x.drop(columns=[col], errors="ignore")
-    x = x.merge(events, on=["Date", "symbol"], how="left", validate="many_to_one")
-    if col not in x.columns:
-        raise RuntimeError(f"Missing merged event feature column: {col}")
+    events = events[["Date", "symbol", col]]
+    x = x.drop(columns=[col], errors="ignore").merge(events, on=["Date", "symbol"], how="left", validate="many_to_one")
     x[col] = pd.to_numeric(x[col], errors="coerce").fillna(0.0)
 
     candidates = x[x["v1_top20"]].copy()
     parts = []
     for day in sorted(candidates["Date"].unique()):
-        day_ts = pd.Timestamp(day)
-        prior = candidates[candidates["Date"] < day_ts].copy()
-        test = candidates[candidates["Date"] == day_ts].copy()
-        if test.empty:
-            continue
+        test = candidates[candidates["Date"] == day].copy()
+        prior = candidates[candidates["Date"] < day].copy()
         hist = prior.loc[prior[col] > 0, ["symbol", "next_ret"]].copy()
         if hist.empty:
             test["event_score"] = 0.0
@@ -57,100 +42,109 @@ def score_one_event_type(rows: pd.DataFrame, raw: pd.DataFrame, event_type: str,
         else:
             hist["event_type"] = event_type
             rules = _event_score_rules(hist, prior, min_n=min_n, shrink_k=shrink_k)
-            test["event_score"] = test.apply(
-                lambda r: float(r[col]) * rules.get((str(r["symbol"]), event_type), 0.0), axis=1
-            )
-            test["event_known"] = test["symbol"].map(
-                lambda s: int((str(s), event_type) in rules)
-            )
+            test["event_score"] = test.apply(lambda r: float(r[col]) * rules.get((str(r["symbol"]), event_type), 0.0), axis=1)
+            test["event_known"] = test["symbol"].map(lambda s: int((str(s), event_type) in rules))
         parts.append(test)
-    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+    out = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+    if not out.empty and set(out["_row_id"]) != set(candidates["_row_id"]):
+        raise SystemExit(f"Row-id coverage changed for event type {event_type}")
+    return out
 
 
-def bootstrap_ci(base_values: np.ndarray, selected_values: np.ndarray, n_boot: int, seed: int = 42) -> tuple[float, float, float]:
-    observed = float(selected_values.mean() - base_values.mean())
-    rng = np.random.default_rng(seed)
-    base_n, selected_n = len(base_values), len(selected_values)
-    boot = np.empty(n_boot, dtype=float)
-    for i in range(n_boot):
-        b = base_values[rng.integers(0, base_n, size=base_n)]
-        s = selected_values[rng.integers(0, selected_n, size=selected_n)]
-        boot[i] = float(s.mean() - b.mean())
-    lo, hi = np.quantile(boot, [0.025, 0.975])
-    return observed, float(lo), float(hi)
+def evaluate(base, scored, frac, direction, n_boot):
+    news = scored[(scored["event_known"] > 0) & scored["event_score"].notna()].copy()
+    base = base[base["next_ret"].notna()].copy()
+    if news.empty:
+        return len(base), 0, 0, float(base["next_ret"].mean()) if len(base) else 0.0, 0.0, 0.0, 0.0, 0.0, "NO_ELIGIBLE_CASES"
+    selected_rows = prospective_filter(news, frac=frac, direction=direction, min_history=20)
+    eligible = selected_rows[selected_rows["eligible"] & selected_rows["next_ret"].notna()].copy()
+    selected = eligible[eligible["selected"]].copy()
+    mean_base = float(base["next_ret"].mean()) if len(base) else 0.0
+    if selected.empty:
+        return len(base), len(eligible), 0, mean_base, 0.0, 0.0, 0.0, 0.0, "NO_SELECTED_CASES"
+    ids = set(selected["_row_id"])
+    mask = np.array([rid in ids for rid in base["_row_id"]], dtype=bool)
+    if not mask.any():
+        return len(base), len(eligible), len(selected), mean_base, np.nan, np.nan, np.nan, np.nan, "INVALID_SELECTION_ID_ALIGNMENT"
+    values = base["next_ret"].to_numpy(float)
+    delta, lo, hi = bootstrap_delta(values, mask, n_boot, 42)
+    return len(base), len(eligible), len(selected), mean_base, float(values[mask].mean()), delta, lo, hi, "OK"
 
 
-def evaluate(scored: pd.DataFrame, frac: float, invert: bool, n_boot: int) -> pd.DataFrame:
+def annual_stability(base, scored, frac, direction):
+    news = scored[(scored["event_known"] > 0) & scored["event_score"].notna()].copy()
+    if news.empty:
+        return pd.DataFrame()
+    sel = prospective_filter(news, frac=frac, direction=direction, min_history=20)
     out = []
-    for symbol, s in scored.groupby("symbol", sort=True):
-        base = s[s["next_ret"].notna()].copy()
-        elig = s[(s["event_known"] > 0) & s["next_ret"].notna()].copy()
-        if elig.empty:
-            out.append(dict(symbol=symbol, n_base=len(base), n_eligible=0, n_selected=0,
-                            mean_base=float(base.next_ret.mean()) if len(base) else 0.0,
-                            mean_selected_gross=0.0, delta_mean=0.0, ci_low=0.0, ci_high=0.0,
-                            status="NO_ELIGIBLE_CASES"))
-            continue
-        vals = -elig["event_score"] if invert else elig["event_score"]
-        elig = elig.copy()
-        elig["rank"] = vals.rank(method="first", ascending=False)
-        cutoff = max(1, int(np.ceil(frac * len(elig))))
-        sel = elig[elig["rank"] <= cutoff]
-        mean_base = float(base.next_ret.mean())
-        if sel.empty:
-            out.append(dict(symbol=symbol, n_base=len(base), n_eligible=len(elig), n_selected=0,
-                            mean_base=mean_base, mean_selected_gross=0.0, delta_mean=0.0,
-                            ci_low=0.0, ci_high=0.0, status="NO_SELECTED_CASES"))
-            continue
-        mean_sel = float(sel.next_ret.mean())
-        delta, lo, hi = bootstrap_ci(base.next_ret.to_numpy(float), sel.next_ret.to_numpy(float), n_boot)
-        out.append(dict(symbol=symbol, n_base=len(base), n_eligible=len(elig), n_selected=len(sel),
-                        mean_base=mean_base, mean_selected_gross=mean_sel, delta_mean=delta,
-                        ci_low=lo, ci_high=hi, status="OK"))
+    for symbol, b in base.groupby("symbol", sort=True):
+        b = b.copy(); b["year"] = pd.to_datetime(b["Date"]).dt.year
+        s = sel[sel["symbol"] == symbol].copy(); s["year"] = pd.to_datetime(s["Date"]).dt.year
+        for year, by in b.groupby("year", sort=True):
+            by = by[by["next_ret"].notna()]
+            sy = s[(s["year"] == year) & s["eligible"] & s["selected"] & s["next_ret"].notna()]
+            mean_base = float(by["next_ret"].mean()) if len(by) else 0.0
+            mean_sel = float(sy["next_ret"].mean()) if len(sy) else 0.0
+            out.append({"symbol": symbol, "year": int(year), "n_base": len(by), "n_eligible": int(((s["year"] == year) & s["eligible"] & s["next_ret"].notna()).sum()), "n_selected": len(sy), "mean_base": mean_base, "mean_selected_gross": mean_sel, "delta_mean": mean_sel - mean_base if len(sy) else 0.0, "status": "OK" if len(sy) else "NO_SELECTED_CASES"})
     return pd.DataFrame(out)
 
 
-def main() -> None:
+def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("rows_csv")
     ap.add_argument("raw_gkg")
     ap.add_argument("--out", default="results/news_v3_lag1_event_type_diagnostics.csv")
+    ap.add_argument("--out-stability", default="results/news_v3_lag1_event_type_stability.csv")
     ap.add_argument("--min-n", type=int, default=20)
     ap.add_argument("--shrink-k", type=float, default=50.0)
     ap.add_argument("--n-boot", type=int, default=10000)
     args = ap.parse_args()
-
     if args.min_n < 1 or args.shrink_k < 0 or args.n_boot < 100:
         raise SystemExit("Invalid diagnostic parameters")
 
     rows = pd.read_csv(args.rows_csv)
     raw = pd.read_csv(args.raw_gkg)
-    reports = []
-    for event_type in EVENT_TYPES:
-        scored = score_one_event_type(rows, raw, event_type, args.min_n, args.shrink_k)
-        for frac, label in ((0.25, "top25"), (0.50, "top50")):
-            for invert in (False, True):
-                r = evaluate(scored, frac, invert, args.n_boot)
-                r["event_type"] = event_type
-                r["selection"] = label
-                r["direction"] = "inverted" if invert else "normal"
-                reports.append(r)
+    rows["Date"] = pd.to_datetime(rows["Date"], errors="coerce")
+    rows["symbol"] = rows["symbol"].astype(str).str.upper().str.strip()
+    rows["next_ret"] = pd.to_numeric(rows["next_ret"], errors="coerce")
+    rows["v1_top20"] = rows["v1_top20"].fillna(False).astype(bool)
+    base = rows[rows["v1_top20"]].dropna(subset=["Date"]).copy()
+    base["_row_id"] = np.arange(len(base))
 
-    report = pd.concat(reports, ignore_index=True)
-    cols = ["event_type", "symbol", "selection", "direction", "n_base", "n_eligible", "n_selected",
-            "mean_base", "mean_selected_gross", "delta_mean", "ci_low", "ci_high", "status"]
-    report = report[cols].sort_values(["event_type", "symbol", "selection", "direction"])
-    numeric_cols = ["n_base", "n_eligible", "n_selected", "mean_base", "mean_selected_gross", "delta_mean", "ci_low", "ci_high"]
-    ok = report[report["status"].eq("OK")]
-    if ok.empty or not np.isfinite(ok[numeric_cols].to_numpy(float)).all():
-        raise SystemExit("Invalid event-type diagnostic result")
+    reports, stability_parts = [], []
+    for event_type in EVENT_TYPES:
+        scored = score_one_event_type(base, raw, event_type, args.min_n, args.shrink_k)
+        for symbol, b in base.groupby("symbol", sort=True):
+            ss = scored[scored["symbol"] == symbol].copy()
+            for frac, label in ((0.25, "top25"), (0.50, "top50")):
+                for direction in ("normal", "inverted"):
+                    n_base, n_eligible, n_selected, mean_base, mean_sel, delta, lo, hi, status = evaluate(b, ss, frac, direction, args.n_boot)
+                    reports.append({"event_type": event_type, "symbol": symbol, "selection": label, "direction": direction, "n_base": n_base, "n_eligible": n_eligible, "n_selected": n_selected, "mean_base": mean_base, "mean_selected_gross": mean_sel, "delta_mean": delta, "ci_low": lo, "ci_high": hi, "status": status})
+                st = annual_stability(b, ss, frac, "inverted")
+                if not st.empty:
+                    st["event_type"] = event_type; st["selection"] = label; st["direction"] = "inverted"; stability_parts.append(st)
+
+    report = pd.DataFrame(reports).sort_values(["event_type", "symbol", "selection", "direction"])
+    stability = pd.concat(stability_parts, ignore_index=True) if stability_parts else pd.DataFrame()
+    ok = report[report["status"] == "OK"]
+    if not ok.empty and not np.isfinite(ok[["n_base", "n_eligible", "n_selected", "mean_base", "mean_selected_gross", "delta_mean", "ci_low", "ci_high"]].to_numpy(float)).all():
+        raise SystemExit("Invalid prospective event-type diagnostic result")
+    if (report["n_selected"] > report["n_eligible"]).any():
+        raise SystemExit("Invalid prospective event-type selection counts")
+    if not stability.empty:
+        ok_st = stability[stability["status"] == "OK"]
+        if not ok_st.empty and not np.isfinite(ok_st[["n_base", "n_eligible", "n_selected", "mean_base", "mean_selected_gross", "delta_mean"]].to_numpy(float)).all():
+            raise SystemExit("Invalid prospective event-type stability result")
 
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-    report.to_csv(args.out, index=False)
+    report.to_csv(args.out, index=False); stability.to_csv(args.out_stability, index=False)
     print("NEWS V3 LAG1 EVENT TYPE DIAGNOSTICS")
     print(report.to_string(index=False))
-    print(f"Saved {args.out}")
     print("NEWS V3 LAG1 EVENT TYPE DIAGNOSTICS PASS")
+    print("NEWS V3 LAG1 EVENT TYPE STABILITY")
+    print(stability.to_string(index=False))
+    print("NEWS V3 LAG1 EVENT TYPE STABILITY PASS")
+    print(f"Saved {args.out}"); print(f"Saved {args.out_stability}")
 
 
 if __name__ == "__main__":
