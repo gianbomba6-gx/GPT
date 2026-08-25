@@ -72,32 +72,32 @@ def yearly_walk_forward(data: pd.DataFrame) -> pd.DataFrame:
                 score, tr, _ = fit_regressor(train, test)
             if score.empty:
                 continue
-            thr = training_top20_threshold(train, score.reindex(train.index))
-            # To avoid accidentally using test labels, the threshold comes from
-            # a separate model fitted only on the training period.
+            # The threshold must always be learned from a model fit on the
+            # training period, never from the test scores.
+            if variant.startswith("target_"):
+                model = HistGradientBoostingClassifier(
+                    max_iter=250, max_leaf_nodes=15, learning_rate=.05,
+                    l2_regularization=2, random_state=42
+                )
+                tr2 = train.dropna(subset=FEATURES + [variant]).copy()
+                if len(tr2) < 500 or tr2[variant].nunique() < 2:
+                    continue
+                model.fit(tr2[FEATURES], tr2[variant].astype(int))
+                train_score = pd.Series(model.predict_proba(tr2[FEATURES])[:, 1], index=tr2.index)
+            else:
+                model = HistGradientBoostingRegressor(
+                    max_iter=250, max_leaf_nodes=15, learning_rate=.05,
+                    l2_regularization=2, random_state=42, loss="squared_error"
+                )
+                tr2 = train.dropna(subset=FEATURES + ["next_ret"]).copy()
+                if len(tr2) < 500:
+                    continue
+                model.fit(tr2[FEATURES], tr2["next_ret"].astype(float))
+                train_score = pd.Series(model.predict(tr2[FEATURES]), index=tr2.index)
+            thr = training_top20_threshold(train, train_score)
             if not np.isfinite(thr):
-                # Refit on train and create training scores for the threshold.
-                if variant.startswith("target_"):
-                    model = HistGradientBoostingClassifier(
-                        max_iter=250, max_leaf_nodes=15, learning_rate=.05,
-                        l2_regularization=2, random_state=42
-                    )
-                    tr2 = train.dropna(subset=FEATURES + [variant]).copy()
-                    if len(tr2) < 500 or tr2[variant].nunique() < 2:
-                        continue
-                    model.fit(tr2[FEATURES], tr2[variant].astype(int))
-                    train_score = pd.Series(model.predict_proba(tr2[FEATURES])[:, 1], index=tr2.index)
-                else:
-                    model = HistGradientBoostingRegressor(
-                        max_iter=250, max_leaf_nodes=15, learning_rate=.05,
-                        l2_regularization=2, random_state=42, loss="squared_error"
-                    )
-                    tr2 = train.dropna(subset=FEATURES + ["next_ret"]).copy()
-                    if len(tr2) < 500:
-                        continue
-                    model.fit(tr2[FEATURES], tr2["next_ret"].astype(float))
-                    train_score = pd.Series(model.predict(tr2[FEATURES]), index=tr2.index)
-                thr = training_top20_threshold(train, train_score)
+                continue
+
             test[f"score_{variant}"] = score.reindex(test.index)
             test[f"signal_{variant}"] = test["baseline_signal"] & (test[f"score_{variant}"] >= thr)
 
@@ -105,12 +105,17 @@ def yearly_walk_forward(data: pd.DataFrame) -> pd.DataFrame:
             baseline = test[test["baseline_signal"] & test["next_ret"].notna()].copy()
             if selected.empty or baseline.empty:
                 continue
+
             auc = float("nan")
             if variant.startswith("target_"):
                 y = test.loc[test["baseline_signal"] & test["next_ret"].notna(), variant]
                 p = test.loc[y.index, f"score_{variant}"]
-                if len(y) >= 10 and y.nunique() > 1:
-                    auc = float(roc_auc_score(y.astype(int), p))
+                finite = y.notna() & p.notna() & np.isfinite(p.to_numpy(float))
+                y_valid = y.loc[finite]
+                p_valid = p.loc[finite]
+                if len(y_valid) >= 10 and y_valid.nunique() > 1:
+                    auc = float(roc_auc_score(y_valid.astype(int), p_valid.astype(float)))
+
             out.append({
                 "year": int(year),
                 "variant": variant,
