@@ -1,0 +1,53 @@
+name: V1 top10 operational confirmation
+
+on:
+  workflow_dispatch:
+
+jobs:
+  top10-operational:
+    name: Walk-forward V1 top10 operational confirmation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt pytest
+      - name: Run top10 operational confirmation
+        run: |
+          python src/v1_top10_operational_confirmation.py \
+            --out results/v1_top10_operational_confirmation.csv \
+            --out-stability results/v1_top10_operational_stability.csv \
+            --n-boot 10000
+      - name: Validate operational confirmation
+        run: |
+          python - <<'PY'
+          import numpy as np
+          import pandas as pd
+          p='results/v1_top10_operational_confirmation.csv'; s='results/v1_top10_operational_stability.csv'
+          d=pd.read_csv(p); st=pd.read_csv(s)
+          req={'symbol','strategy','n_baseline','n_selected','selection_rate','mean_selected_gross','mean_selected_net','hit3','ci_low','ci_high','cost_bps','status'}
+          if not req.issubset(d.columns) or d.empty: raise SystemExit('Invalid operational confirmation schema')
+          if not set(d.strategy).issubset({'fixed70','top10','top10_minus_fixed70'}): raise SystemExit('Unexpected operational strategy')
+          if (d.n_selected > d.n_baseline).any(): raise SystemExit('Invalid operational counts')
+          ok=d[d.status.eq('OK')]
+          nums=['n_baseline','n_selected','selection_rate','mean_selected_gross','mean_selected_net','hit3','ci_low','ci_high','cost_bps']
+          if not ok.empty and not np.isfinite(ok[nums].to_numpy(float)).all(): raise SystemExit('Invalid operational numeric result')
+          req_st={'symbol','year','strategy','n_baseline','n_selected','mean_selected_gross','hit3'}
+          if not req_st.issubset(st.columns): raise SystemExit('Invalid operational stability schema')
+          if (st.n_selected > st.n_baseline).any(): raise SystemExit('Invalid operational stability counts')
+          print('V1 TOP10 OPERATIONAL CONFIRMATION PASS'); print(d.to_string(index=False)); print('V1 TOP10 OPERATIONAL STABILITY PASS'); print(st.to_string(index=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v1-top10-operational-confirmation
+          path: |
+            market_rebound_model/results/v1_top10_operational_confirmation.csv
+            market_rebound_model/results/v1_top10_operational_stability.csv
+          if-no-files-found: error
