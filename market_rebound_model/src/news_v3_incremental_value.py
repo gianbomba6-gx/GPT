@@ -68,6 +68,16 @@ def evaluate(candidates: pd.DataFrame, selected_rows: pd.DataFrame, label: str, 
     base_ids = base["_row_id"].to_numpy()
     selected_ids = set(selected["_row_id"].to_numpy())
     mask = np.array([rid in selected_ids for rid in base_ids], dtype=bool)
+    if not mask.any():
+        result.update({
+            "mean_selected_gross": float("nan"),
+            "mean_selected_net": float("nan"),
+            "delta_mean": float("nan"),
+            "ci_low": float("nan"),
+            "ci_high": float("nan"),
+            "status": "INVALID_SELECTION_ID_ALIGNMENT",
+        })
+        return result
     values = base["next_ret"].to_numpy(float)
     delta, lo, hi = bootstrap_delta(values, mask, n_boot, 42)
     mean_sel = float(values[mask].mean())
@@ -101,9 +111,10 @@ def main() -> None:
     rows["v1_top20"] = rows["v1_top20"].fillna(False).astype(bool)
 
     base_rows = rows[rows["v1_top20"]].dropna(subset=["Date", "next_ret"]).copy()
-    news_rows = base_rows[base_rows["news_rank_known_events"] > 0].dropna(subset=["news_rank_score"]).copy()
     base_rows["_row_id"] = np.arange(len(base_rows))
-    news_rows["_row_id"] = np.arange(len(news_rows))
+    # Preserve the baseline row id so selected news rows can be matched back to
+    # the exact same V1 observation during evaluation.
+    news_rows = base_rows[base_rows["news_rank_known_events"] > 0].dropna(subset=["news_rank_score"]).copy()
 
     reports = []
     parts = []
