@@ -5,8 +5,10 @@ on:
     paths:
       - 'market_rebound_model/src/news_v3_nvda_selection_bootstrap.py'
       - 'market_rebound_model/src/news_v3_nvda_selection_robustness.py'
+      - 'market_rebound_model/src/news_v3_multi_symbol_selection_robustness.py'
       - 'market_rebound_model/tests/test_news_v3_nvda_selection_bootstrap.py'
       - 'market_rebound_model/tests/test_news_v3_nvda_selection_robustness.py'
+      - 'market_rebound_model/tests/test_news_v3_multi_symbol_selection_robustness.py'
       - '.github/workflows/news-v3-nvda-selection.yml'
   workflow_dispatch:
 
@@ -30,7 +32,8 @@ jobs:
         run: |
           python -m pytest -q \
             tests/test_news_v3_nvda_selection_bootstrap.py \
-            tests/test_news_v3_nvda_selection_robustness.py
+            tests/test_news_v3_nvda_selection_robustness.py \
+            tests/test_news_v3_multi_symbol_selection_robustness.py
       - name: Find latest secondary ranking artifact
         id: artifact
         env:
@@ -71,6 +74,16 @@ jobs:
             --n-boot 10000 \
             --min-history 20 \
             --cost-bps 20
+      - name: Run multi-symbol prospective robustness
+        run: |
+          python src/news_v3_multi_symbol_selection_robustness.py \
+            results/news_v3_secondary_ranking_inverted_rows.csv \
+            --out results/news_v3_multi_symbol_selection_robustness.csv \
+            --out-rows results/news_v3_multi_symbol_selection_prospective_rows.csv \
+            --out-stability results/news_v3_multi_symbol_selection_stability.csv \
+            --n-boot 10000 \
+            --min-history 20 \
+            --cost-bps 20
       - name: Validate
         run: |
           python - <<'PY'
@@ -107,13 +120,33 @@ jobs:
           if not stability['n_eligible'].gt(0).all():
               raise SystemExit('Invalid NVDA stability sample')
 
+          ms = pd.read_csv('results/news_v3_multi_symbol_selection_robustness.csv')
+          required_ms = {'symbol','selection','n_total','n_eligible','n_selected','delta_mean','ci_low','ci_high'}
+          if not required_ms.issubset(ms.columns):
+              raise SystemExit('Invalid multi-symbol robustness schema')
+          if not set(ms['selection'].unique()).issubset({'top25','top50'}):
+              raise SystemExit('Invalid multi-symbol selection labels')
+          for _, row in ms.iterrows():
+              vals = [row.n_total, row.n_eligible, row.n_selected]
+              if not all(np.isfinite(vals)):
+                  raise SystemExit('Non-finite multi-symbol counts')
+              if row.n_eligible <= 0 or row.n_selected <= 0 or row.n_selected > row.n_eligible:
+                  raise SystemExit('Invalid multi-symbol selection counts')
+              vals_stat = [row.delta_mean, row.ci_low, row.ci_high]
+              if not all(np.isfinite(vals_stat)) or row.ci_low > row.ci_high:
+                  raise SystemExit('Invalid multi-symbol robustness statistics')
+
           print('NVDA NEWS SELECTION PASS')
           print(r.to_string(index=False))
           print('NVDA PROSPECTIVE ROBUSTNESS PASS')
           print(rr.to_string(index=False))
           print('NVDA TOP50 STABILITY')
           print(stability.to_string(index=False))
-          PY
+          print('MULTI-SYMBOL PROSPECTIVE ROBUSTNESS PASS')
+          print(ms.to_string(index=False))
+          coverage = pd.read_csv('results/news_v3_multi_symbol_selection_robustness_coverage.csv')
+          print('MULTI-SYMBOL COVERAGE')
+          print(coverage.to_string(index=False))
       - uses: actions/upload-artifact@v4
         with:
           name: news-v3-nvda-selection-bootstrap
@@ -122,4 +155,8 @@ jobs:
             market_rebound_model/results/news_v3_nvda_selection_robustness.csv
             market_rebound_model/results/news_v3_nvda_selection_prospective_rows.csv
             market_rebound_model/results/news_v3_nvda_selection_stability.csv
+            market_rebound_model/results/news_v3_multi_symbol_selection_robustness.csv
+            market_rebound_model/results/news_v3_multi_symbol_selection_robustness_coverage.csv
+            market_rebound_model/results/news_v3_multi_symbol_selection_prospective_rows.csv
+            market_rebound_model/results/news_v3_multi_symbol_selection_stability.csv
           if-no-files-found: error
