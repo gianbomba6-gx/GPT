@@ -35,7 +35,6 @@ def _event_score_rules(
     min_n: int = MIN_N,
     shrink_k: float = SHRINK_K,
 ) -> dict[tuple[str, str], float]:
-    """Learn event deltas against the full prior-candidate baseline."""
     rules: dict[tuple[str, str], float] = {}
     for (symbol, event), s in event_history.groupby(["symbol", "event_type"], sort=False):
         q = s["next_ret"].dropna()
@@ -114,11 +113,7 @@ def score_oos(
             if long_parts
             else pd.DataFrame(columns=["symbol", "next_ret", "event_type"])
         )
-        rules = (
-            _event_score_rules(event_history, prior, min_n=min_n, shrink_k=shrink_k)
-            if not event_history.empty
-            else {}
-        )
+        rules = _event_score_rules(event_history, prior, min_n=min_n, shrink_k=shrink_k) if not event_history.empty else {}
 
         test["news_rank_score"] = test.apply(lambda r: _score_row(r, rules), axis=1)
         if invert_score:
@@ -187,21 +182,16 @@ def main() -> None:
     args = ap.parse_args()
     rows = pd.read_csv(args.rows_csv)
     raw = pd.read_csv(args.raw_gkg) if args.raw_gkg else None
-    scored = score_oos(
-        rows,
-        raw=raw,
-        min_n=args.min_n,
-        shrink_k=args.shrink_k,
-        invert_score=args.invert_score,
-    )
+    scored = score_oos(rows, raw=raw, min_n=args.min_n, shrink_k=args.shrink_k, invert_score=args.invert_score)
     if scored.empty:
         raise SystemExit("No V1 top20 rows available for secondary news ranking")
     report, quartiles = build_report(scored)
     p = Path(args.out)
     p.parent.mkdir(parents=True, exist_ok=True)
+    stem = p.stem
     report.to_csv(p, index=False)
-    quartiles.to_csv(p.with_name("news_v3_secondary_ranking_quartiles.csv"), index=False)
-    scored.to_csv(p.with_name("news_v3_secondary_ranking_rows.csv"), index=False)
+    quartiles.to_csv(p.with_name(stem + "_quartiles.csv"), index=False)
+    scored.to_csv(p.with_name(stem + "_rows.csv"), index=False)
     print("INVERTED_SCORE=" + str(args.invert_score))
     print("SYMBOL REPORT")
     print(report.to_string(index=False))
