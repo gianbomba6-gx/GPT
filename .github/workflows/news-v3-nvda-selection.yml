@@ -59,13 +59,19 @@ jobs:
       - name: Validate
         run: |
           python - <<'PY'
+          import numpy as np
           import pandas as pd
           r = pd.read_csv('results/news_v3_nvda_selection_bootstrap.csv')
           if set(r['selection']) != {'baseline','top25','top50'}:
               raise SystemExit('Missing NVDA selection groups')
           for _, row in r[r.selection != 'baseline'].iterrows():
-              if not (row.ci_low <= row.delta_mean <= row.ci_high):
-                  raise SystemExit('Invalid bootstrap CI')
+              vals = [row.n_all, row.n_selected, row.delta_mean, row.ci_low, row.ci_high]
+              if not all(np.isfinite(vals)):
+                  raise SystemExit('Non-finite NVDA bootstrap result')
+              if row.n_all <= 0 or row.n_selected <= 0 or row.n_selected > row.n_all:
+                  raise SystemExit('Invalid NVDA selection counts')
+              if row.ci_low > row.ci_high:
+                  raise SystemExit('Invalid bootstrap CI ordering')
           print('NVDA NEWS SELECTION PASS')
           print(r.to_string(index=False))
           PY
