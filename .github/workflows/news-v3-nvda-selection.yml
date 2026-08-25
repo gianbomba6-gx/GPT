@@ -6,6 +6,7 @@ on:
       - 'market_rebound_model/src/news_v3_nvda_selection_bootstrap.py'
       - 'market_rebound_model/src/news_v3_nvda_selection_robustness.py'
       - 'market_rebound_model/src/news_v3_multi_symbol_selection_robustness.py'
+      - 'market_rebound_model/src/news_v3_multi_symbol_direction_check.py'
       - 'market_rebound_model/tests/test_news_v3_nvda_selection_bootstrap.py'
       - 'market_rebound_model/tests/test_news_v3_nvda_selection_robustness.py'
       - 'market_rebound_model/tests/test_news_v3_multi_symbol_selection_robustness.py'
@@ -84,6 +85,15 @@ jobs:
             --n-boot 10000 \
             --min-history 20 \
             --cost-bps 20
+      - name: Run normal versus inverted score direction check
+        run: |
+          python src/news_v3_multi_symbol_direction_check.py \
+            results/news_v3_secondary_ranking_inverted_rows.csv \
+            --out results/news_v3_multi_symbol_direction_check.csv \
+            --out-rows results/news_v3_multi_symbol_direction_rows.csv \
+            --n-boot 10000 \
+            --min-history 20 \
+            --cost-bps 20
       - name: Validate
         run: |
           python - <<'PY'
@@ -136,6 +146,17 @@ jobs:
               if not all(np.isfinite(vals_stat)) or row.ci_low > row.ci_high:
                   raise SystemExit('Invalid multi-symbol robustness statistics')
 
+          dc = pd.read_csv('results/news_v3_multi_symbol_direction_check_pivot.csv')
+          required_dc = {'symbol','selection','normal','inverted','spread_inverted_minus_normal'}
+          if not required_dc.issubset(dc.columns):
+              raise SystemExit('Invalid score direction comparison schema')
+          if len(dc) == 0:
+              raise SystemExit('Empty score direction comparison')
+          for _, row in dc.iterrows():
+              vals = [row.normal, row.inverted, row.spread_inverted_minus_normal]
+              if not all(np.isfinite(vals)):
+                  raise SystemExit('Non-finite score direction comparison')
+
           print('NVDA NEWS SELECTION PASS')
           print(r.to_string(index=False))
           print('NVDA PROSPECTIVE ROBUSTNESS PASS')
@@ -144,9 +165,12 @@ jobs:
           print(stability.to_string(index=False))
           print('MULTI-SYMBOL PROSPECTIVE ROBUSTNESS PASS')
           print(ms.to_string(index=False))
+          print('SCORE DIRECTION COMPARISON')
+          print(dc.to_string(index=False))
           coverage = pd.read_csv('results/news_v3_multi_symbol_selection_robustness_coverage.csv')
           print('MULTI-SYMBOL COVERAGE')
           print(coverage.to_string(index=False))
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: news-v3-nvda-selection-bootstrap
@@ -159,4 +183,7 @@ jobs:
             market_rebound_model/results/news_v3_multi_symbol_selection_robustness_coverage.csv
             market_rebound_model/results/news_v3_multi_symbol_selection_prospective_rows.csv
             market_rebound_model/results/news_v3_multi_symbol_selection_stability.csv
+            market_rebound_model/results/news_v3_multi_symbol_direction_check.csv
+            market_rebound_model/results/news_v3_multi_symbol_direction_check_pivot.csv
+            market_rebound_model/results/news_v3_multi_symbol_direction_rows.csv
           if-no-files-found: error
