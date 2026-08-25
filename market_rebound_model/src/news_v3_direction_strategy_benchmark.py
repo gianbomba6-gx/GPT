@@ -12,7 +12,6 @@ def _select_with_history(x: pd.DataFrame, frac: float, direction: str, min_histo
     x["eligible"] = False
     x["selected"] = False
     scores = x["news_rank_score"].to_numpy(float)
-    rets = x["next_ret"].to_numpy(float)
     for i in range(len(x)):
         prior_scores = pd.Series(scores[:i]).dropna()
         if len(prior_scores) < min_history:
@@ -70,7 +69,7 @@ def _bootstrap(values: np.ndarray, selected: np.ndarray, n_boot: int, seed: int)
     return observed, float(lo), float(hi)
 
 
-def evaluate(x: pd.DataFrame, strategy: str, frac: float, n_boot: int, seed: int) -> tuple[dict, pd.DataFrame]:
+def evaluate(x: pd.DataFrame, strategy: str, n_boot: int, seed: int) -> tuple[dict, pd.DataFrame]:
     z = x[x["eligible"] & x["next_ret"].notna()].copy().reset_index(drop=True)
     selected = z["selected"].to_numpy(bool)
     values = z["next_ret"].to_numpy(float)
@@ -110,7 +109,7 @@ def main() -> None:
                 "calibrated": _select_calibrated(g, frac, args.min_history, args.min_calibration),
             }
             for strategy, x in strategies.items():
-                stats, z = evaluate(x, strategy, frac, args.n_boot, 42)
+                stats, z = evaluate(x, strategy, args.n_boot, 42)
                 stats.update({"symbol": symbol, "selection": label, "min_history": args.min_history, "min_calibration": args.min_calibration})
                 reports.append(stats)
                 z = z.copy()
@@ -135,7 +134,7 @@ def main() -> None:
     rows_out.to_csv(args.out_rows, index=False)
     pivot_path = Path(args.out).with_name(Path(args.out).stem + "_pivot.csv")
     pivot.to_csv(pivot_path, index=False)
-    print("DIRECTION STRATEGY BENCHMARK")
+    print("DIRECTION STRATEGY BENCHMARK (RAW SCORE)")
     print(report.to_string(index=False))
     print("BENCHMARK PIVOT")
     print(pivot.to_string(index=False))
