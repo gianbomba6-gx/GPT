@@ -44,37 +44,41 @@ def bootstrap_delta(values: np.ndarray, selected: np.ndarray, n_boot: int, seed:
 def evaluate(candidates: pd.DataFrame, selected_rows: pd.DataFrame, label: str, n_boot: int, cost_bps: float) -> dict:
     base = candidates[candidates["next_ret"].notna()].copy()
     selected = selected_rows[selected_rows["eligible"] & selected_rows["selected"] & selected_rows["next_ret"].notna()].copy()
+    eligible = selected_rows[selected_rows["eligible"] & selected_rows["next_ret"].notna()].copy()
+
+    result = {
+        "set": label,
+        "n_base": len(base),
+        "n_eligible": len(eligible),
+        "n_selected": int(len(selected)),
+        "mean_base": float(base["next_ret"].mean()) if len(base) else 0.0,
+        "mean_selected_gross": 0.0,
+        "mean_selected_net": 0.0,
+        "delta_mean": 0.0,
+        "ci_low": 0.0,
+        "ci_high": 0.0,
+        "cost_bps": cost_bps,
+        "status": "INSUFFICIENT_HISTORY" if len(eligible) == 0 else ("NO_SELECTED_CASES" if selected.empty else "OK"),
+    }
+
     if selected.empty:
-        return {
-            "set": label,
-            "n_base": len(base),
-            "n_selected": 0,
-            "mean_base": float(base["next_ret"].mean()) if len(base) else np.nan,
-            "mean_selected_gross": np.nan,
-            "mean_selected_net": np.nan,
-            "delta_mean": np.nan,
-            "ci_low": np.nan,
-            "ci_high": np.nan,
-            "cost_bps": cost_bps,
-        }
+        return result
+
     base_ids = base["_row_id"].to_numpy()
     selected_ids = set(selected["_row_id"].to_numpy())
     mask = np.array([rid in selected_ids for rid in base_ids], dtype=bool)
     values = base["next_ret"].to_numpy(float)
     delta, lo, hi = bootstrap_delta(values, mask, n_boot, 42)
     mean_sel = float(values[mask].mean())
-    return {
-        "set": label,
-        "n_base": len(base),
-        "n_selected": int(mask.sum()),
-        "mean_base": float(base["next_ret"].mean()),
+    result.update({
         "mean_selected_gross": mean_sel,
         "mean_selected_net": mean_sel - cost_bps / 10000.0,
         "delta_mean": delta,
         "ci_low": lo,
         "ci_high": hi,
-        "cost_bps": cost_bps,
-    }
+        "status": "OK",
+    })
+    return result
 
 
 def main() -> None:
@@ -110,10 +114,11 @@ def main() -> None:
                 y["filter"] = label
                 y["direction"] = direction
                 parts.append(y)
-        mean_base = float(base["next_ret"].mean())
+        mean_base = float(base["next_ret"].mean()) if len(base) else 0.0
         reports.append({
             "set": f"{symbol}: V1 top20 baseline",
             "n_base": len(base),
+            "n_eligible": len(base),
             "n_selected": len(base),
             "mean_base": mean_base,
             "mean_selected_gross": mean_base,
@@ -122,6 +127,7 @@ def main() -> None:
             "ci_low": 0.0,
             "ci_high": 0.0,
             "cost_bps": args.cost_bps,
+            "status": "OK",
         })
 
     report = pd.DataFrame(reports)
