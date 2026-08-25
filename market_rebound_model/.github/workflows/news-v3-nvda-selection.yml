@@ -1,0 +1,173 @@
+name: News V3 NVDA selection
+
+on:
+  push:
+    paths:
+      - 'market_rebound_model/src/news_v3_nvda_selection_bootstrap.py'
+      - 'market_rebound_model/src/news_v3_nvda_selection_robustness.py'
+      - 'market_rebound_model/src/news_v3_multi_symbol_selection_robustness.py'
+      - 'market_rebound_model/src/news_v3_multi_symbol_direction_check.py'
+      - 'market_rebound_model/src/news_v3_symbol_direction_calibrator.py'
+      - 'market_rebound_model/src/news_v3_direction_strategy_benchmark.py'
+      - 'market_rebound_model/tests/test_news_v3_nvda_selection_bootstrap.py'
+      - 'market_rebound_model/tests/test_news_v3_nvda_selection_robustness.py'
+      - 'market_rebound_model/tests/test_news_v3_multi_symbol_selection_robustness.py'
+      - '.github/workflows/news-v3-nvda-selection.yml'
+  workflow_dispatch:
+
+jobs:
+  nvda-selection:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    defaults:
+      run:
+        working-directory: market_rebound_model
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt pytest
+      - name: Test selection bootstrap and robustness
+        run: |
+          python -m pytest -q \
+            tests/test_news_v3_nvda_selection_bootstrap.py \
+            tests/test_news_v3_nvda_selection_robustness.py \
+            tests/test_news_v3_multi_symbol_selection_robustness.py
+      - name: Find latest secondary ranking artifact
+        id: artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id=$(gh api -H 'Accept: application/vnd.github+json' "/repos/${GITHUB_REPOSITORY}/actions/workflows/news-v3-secondary-ranking.yml/runs?status=success&per_page=20" --jq '.workflow_runs[0].id')
+          test -n "$run_id" && test "$run_id" != null
+          artifact_id=$(gh api -H 'Accept: application/vnd.github+json' "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100" --jq '.artifacts[] | select(.name=="news-v3-secondary-ranking") | .id' | head -n1)
+          test -n "$artifact_id"
+          echo "artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
+      - name: Download ranking rows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.artifact.outputs.artifact_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p results/imported
+          gh api -H 'Accept: application/vnd.github+json' "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" > /tmp/ranking.zip
+          unzip -q /tmp/ranking.zip -d results/imported
+          rows=$(find results/imported -type f -name 'news_v3_secondary_ranking_inverted_rows.csv' -print -quit)
+          raw_rows=$(find results/imported -type f -name 'news_v3_secondary_ranking_rows.csv' -print -quit)
+          test -n "$rows"
+          test -n "$raw_rows"
+          cp "$rows" results/news_v3_secondary_ranking_inverted_rows.csv
+          cp "$raw_rows" results/news_v3_secondary_ranking_rows.csv
+          test -s results/news_v3_secondary_ranking_inverted_rows.csv
+          test -s results/news_v3_secondary_ranking_rows.csv
+      - name: Run NVDA top25/top50 selection bootstrap
+        run: |
+          python src/news_v3_nvda_selection_bootstrap.py \
+            results/news_v3_secondary_ranking_inverted_rows.csv \
+            --out results/news_v3_nvda_selection_bootstrap.csv \
+            --n-boot 10000
+      - name: Run prospective NVDA robustness
+        run: |
+          python src/news_v3_nvda_selection_robustness.py \
+            results/news_v3_secondary_ranking_inverted_rows.csv \
+            --out results/news_v3_nvda_selection_robustness.csv \
+            --out-rows results/news_v3_nvda_selection_prospective_rows.csv \
+            --out-stability results/news_v3_nvda_selection_stability.csv \
+            --n-boot 10000 \
+            --min-history 20 \
+            --cost-bps 20
+      - name: Run multi-symbol prospective robustness
+        run: |
+          python src/news_v3_multi_symbol_selection_robustness.py \
+            results/news_v3_secondary_ranking_inverted_rows.csv \
+            --out results/news_v3_multi_symbol_selection_robustness.csv \
+            --out-rows results/news_v3_multi_symbol_selection_prospective_rows.csv \
+            --out-stability results/news_v3_multi_symbol_selection_stability.csv \
+            --n-boot 10000 \
+            --min-history 20 \
+            --cost-bps 20
+      - name: Run normal versus inverted score direction check on raw score
+        run: |
+          python src/news_v3_multi_symbol_direction_check.py \
+            results/news_v3_secondary_ranking_rows.csv \
+            --out results/news_v3_multi_symbol_direction_check.csv \
+            --out-rows results/news_v3_multi_symbol_direction_rows.csv \
+            --n-boot 10000 \
+            --min-history 20 \
+            --cost-bps 20
+      - name: Run prospective per-symbol direction calibration on raw score
+        run: |
+          python src/news_v3_symbol_direction_calibrator.py \
+            results/news_v3_secondary_ranking_rows.csv \
+            --out results/news_v3_symbol_direction_calibration.csv \
+            --out-rows results/news_v3_symbol_direction_calibration_rows.csv \
+            --n-boot 10000 \
+            --min-history 20 \
+            --min-calibration 8
+      - name: Run fixed-versus-calibrated benchmark on raw score
+        run: |
+          python src/news_v3_direction_strategy_benchmark.py \
+            results/news_v3_secondary_ranking_rows.csv \
+            --out results/news_v3_direction_strategy_benchmark.csv \
+            --out-rows results/news_v3_direction_strategy_benchmark_rows.csv \
+            --n-boot 10000 \
+            --min-history 20 \
+            --min-calibration 8
+      - name: Validate direction analyses
+        run: |
+          python - <<'PY'
+          import numpy as np
+          import pandas as pd
+          dc = pd.read_csv('results/news_v3_multi_symbol_direction_check_pivot.csv')
+          if not {'symbol','selection','normal','inverted','spread_inverted_minus_normal'}.issubset(dc.columns):
+              raise SystemExit('Invalid score direction comparison schema')
+          for _, row in dc.iterrows():
+              if not all(np.isfinite([row.normal, row.inverted, row.spread_inverted_minus_normal])):
+                  raise SystemExit('Non-finite score direction comparison')
+          cal = pd.read_csv('results/news_v3_symbol_direction_calibration.csv')
+          if not {'symbol','selection','n_total','n_eligible','n_selected','delta_mean','ci_low','ci_high','normal_count','inverted_count'}.issubset(cal.columns):
+              raise SystemExit('Invalid symbol direction calibration schema')
+          for _, row in cal.iterrows():
+              vals = [row.n_total, row.n_eligible, row.n_selected, row.delta_mean, row.ci_low, row.ci_high, row.normal_count, row.inverted_count]
+              if not all(np.isfinite(vals)) or row.n_eligible <= 0 or row.n_selected <= 0 or row.n_selected > row.n_eligible or row.ci_low > row.ci_high:
+                  raise SystemExit('Invalid symbol direction calibration')
+          bench = pd.read_csv('results/news_v3_direction_strategy_benchmark_pivot.csv')
+          required_b = {'symbol','selection','normal_fixed','inverted_fixed','calibrated','calibrated_minus_best_fixed'}
+          if not required_b.issubset(bench.columns):
+              raise SystemExit('Invalid direction benchmark schema')
+          for _, row in bench.iterrows():
+              if not all(np.isfinite([row.normal_fixed, row.inverted_fixed, row.calibrated, row.calibrated_minus_best_fixed])):
+                  raise SystemExit('Non-finite direction benchmark')
+          print('SCORE DIRECTION COMPARISON')
+          print(dc.to_string(index=False))
+          print('SYMBOL DIRECTION CALIBRATION')
+          print(cal.to_string(index=False))
+          print('DIRECTION STRATEGY BENCHMARK')
+          print(bench.to_string(index=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: news-v3-nvda-selection-bootstrap
+          path: |
+            market_rebound_model/results/news_v3_nvda_selection_bootstrap.csv
+            market_rebound_model/results/news_v3_nvda_selection_robustness.csv
+            market_rebound_model/results/news_v3_nvda_selection_prospective_rows.csv
+            market_rebound_model/results/news_v3_nvda_selection_stability.csv
+            market_rebound_model/results/news_v3_multi_symbol_selection_robustness.csv
+            market_rebound_model/results/news_v3_multi_symbol_selection_robustness_coverage.csv
+            market_rebound_model/results/news_v3_multi_symbol_selection_prospective_rows.csv
+            market_rebound_model/results/news_v3_multi_symbol_selection_stability.csv
+            market_rebound_model/results/news_v3_multi_symbol_direction_check.csv
+            market_rebound_model/results/news_v3_multi_symbol_direction_check_pivot.csv
+            market_rebound_model/results/news_v3_multi_symbol_direction_rows.csv
+            market_rebound_model/results/news_v3_symbol_direction_calibration.csv
+            market_rebound_model/results/news_v3_symbol_direction_calibration_rows.csv
+            market_rebound_model/results/news_v3_direction_strategy_benchmark.csv
+            market_rebound_model/results/news_v3_direction_strategy_benchmark_pivot.csv
+            market_rebound_model/results/news_v3_direction_strategy_benchmark_rows.csv
+          if-no-files-found: error
