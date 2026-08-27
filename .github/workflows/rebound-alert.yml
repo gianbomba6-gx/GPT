@@ -3,21 +3,21 @@ name: Daily rebound scan
 on:
   workflow_dispatch:
   schedule:
-    # GitHub Actions cron is UTC. We trigger all possible DST slots and
-    # execute the scanner only when the local market-clock check is within
-    # 15 minutes AFTER the intended market-close-minus-one-hour time.
+    # GitHub Actions cron is UTC. Each slot maps to one market and one DST season.
+    # The original scheduled slot is identified from github.event.schedule,
+    # so delayed workflow starts do not suppress the scan.
     # Milan: 16:30 Europe/Rome (one hour before 17:30 close).
     # US:    15:00 America/New_York (one hour before 16:00 ET close).
-    - cron: '30 14 * * 1-5'
-    - cron: '30 15 * * 1-5'
-    - cron: '0 19 * * 1-5'
-    - cron: '0 20 * * 1-5'
+    - cron: '30 14 * * 1-5'  # Milan, CEST (UTC+2)
+    - cron: '30 15 * * 1-5'  # Milan, CET  (UTC+1)
+    - cron: '0 19 * * 1-5'   # USA, EDT   (UTC-4)
+    - cron: '0 20 * * 1-5'   # USA, EST   (UTC-5)
 
 jobs:
   scan:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,50 +27,56 @@ jobs:
           python-version: '3.12'
       - name: Install dependencies
         run: pip install -r market_rebound_model/requirements.txt
-      - name: Check market-local trigger time
-        id: market_time
+      - name: Resolve scheduled market slot
+        id: market_slot
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
         run: |
           python - <<'PY'
-          from datetime import datetime, timedelta
+          from datetime import datetime
           from zoneinfo import ZoneInfo
           import os
 
-          now_rome = datetime.now(ZoneInfo("Europe/Rome"))
-          now_ny = datetime.now(ZoneInfo("America/New_York"))
+          schedule = os.environ.get("SCHEDULE", "")
+          rome = datetime.now(ZoneInfo("Europe/Rome"))
+          ny = datetime.now(ZoneInfo("America/New_York"))
 
-          target_rome = now_rome.replace(hour=16, minute=30, second=0, microsecond=0)
-          target_ny = now_ny.replace(hour=15, minute=0, second=0, microsecond=0)
-          tolerance = timedelta(minutes=15)
+          expected = {
+              "30 14 * * 1-5": ("MILAN", 2 * 60 * 60),
+              "30 15 * * 1-5": ("MILAN", 1 * 60 * 60),
+              "0 19 * * 1-5": ("US", -4 * 60 * 60),
+              "0 20 * * 1-5": ("US", -5 * 60 * 60),
+          }
+          if schedule not in expected:
+              raise SystemExit(f"Unknown scheduled cron: {schedule!r}")
 
-          rome_delta = now_rome - target_rome
-          ny_delta = now_ny - target_ny
-
-          if timedelta(0) <= rome_delta <= tolerance:
-              market = "MILAN"
-          elif timedelta(0) <= ny_delta <= tolerance:
-              market = "US"
+          market, expected_offset_seconds = expected[schedule]
+          actual_offset_seconds = (
+              rome.utcoffset().total_seconds() if market == "MILAN" else ny.utcoffset().total_seconds()
+          )
+          if actual_offset_seconds != expected_offset_seconds:
+              print(f"SLOT_INACTIVE schedule={schedule} market={market} actual_offset={actual_offset_seconds} expected_offset={expected_offset_seconds}")
+              run_scan = False
           else:
-              market = ""
+              print(f"SLOT_ACTIVE schedule={schedule} market={market}")
+              run_scan = True
 
-          run_scan = bool(market)
-          print(f"Europe/Rome={now_rome.isoformat()}")
-          print(f"America/New_York={now_ny.isoformat()}")
-          print(f"Milan target={target_rome.isoformat()} delta={rome_delta}")
-          print(f"US target={target_ny.isoformat()} delta={ny_delta}")
+          print(f"Europe/Rome={rome.isoformat()}")
+          print(f"America/New_York={ny.isoformat()}")
           print(f"RUN_SCAN={str(run_scan).lower()}")
-          print(f"SCAN_MARKET={market or 'NONE'}")
+          print(f"SCAN_MARKET={market if run_scan else ''}")
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
               f.write(f"run_scan={'true' if run_scan else 'false'}\n")
-              f.write(f"scan_market={market}\n")
+              f.write(f"scan_market={market if run_scan else ''}\n")
           PY
       - name: Run rebound scanner
-        if: steps.market_time.outputs.run_scan == 'true'
+        if: steps.market_slot.outputs.run_scan == 'true'
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          SCAN_MARKET: ${{ steps.market_time.outputs.scan_market }}
+          SCAN_MARKET: ${{ steps.market_slot.outputs.scan_market }}
         working-directory: market_rebound_model/src
         run: python live_alert.py
-      - name: Skip non-market slot
-        if: steps.market_time.outputs.run_scan != 'true'
-        run: echo "Cron slot is not within 15 minutes after a market-close-minus-one-hour trigger; no scan executed."
+      - name: Skip inactive DST slot
+        if: steps.market_slot.outputs.run_scan != 'true'
+        run: echo "Inactive DST cron slot; no scan executed."
