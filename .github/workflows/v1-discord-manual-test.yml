@@ -1,0 +1,37 @@
+name: V1 Discord manual test
+
+on:
+  workflow_dispatch:
+    inputs:
+      market:
+        description: "Market report to send"
+        required: true
+        type: choice
+        options:
+          - MILAN
+          - US
+        default: US
+
+jobs:
+  manual-test:
+    name: Send real Discord test report
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r market_rebound_model/requirements.txt
+      - name: Run V1 and send test report to Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          SCAN_MARKET: ${{ inputs.market }}
+          DISCORD_TEST_RUN: "true"
+        working-directory: market_rebound_model/src
+        run: python live_alert.py
