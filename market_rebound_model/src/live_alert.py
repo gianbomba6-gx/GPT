@@ -118,6 +118,7 @@ def main() -> int:
     frames: dict[str, pd.DataFrame] = {}
     benchmark_symbol = next(x["symbol"] for x in CONFIG["tickers"] if x["type"] == "benchmark")
     scan_market = os.environ.get("SCAN_MARKET", "AUTO").strip().upper()
+    test_run = os.environ.get("DISCORD_TEST_RUN", "0").strip().lower() in {"1", "true", "yes"}
     if scan_market == "MILAN":
         market_label = "🇮🇹 MILANO"
         report_now = datetime.now(ZoneInfo("Europe/Rome"))
@@ -165,7 +166,6 @@ def main() -> int:
         latest["probability"] = float(model.predict_proba(pd.DataFrame([latest])[FEATURES])[:, 1][0])
         predictions[symbol] = latest
 
-    # A Milan report monitors Milan-listed equities; a US report monitors US equities.
     if scan_market in {"MILAN", "US"}:
         items_to_report = [
             item for item in CONFIG["tickers"]
@@ -205,7 +205,8 @@ def main() -> int:
             )
 
     timestamp = report_now.strftime("%Y-%m-%d %H:%M %Z")
-    header = f"**V1 DAILY CHECK — {market_label}**\nOra controllo: {timestamp}\nThreshold: **{threshold:.1%}** ({threshold_mode})"
+    test_prefix = "🧪 **TEST MANUALE**\n" if test_run else ""
+    header = f"{test_prefix}**V1 DAILY CHECK — {market_label}**\nOra controllo: {timestamp}\nThreshold: **{threshold:.1%}** ({threshold_mode})"
     if alerts:
         message = header + "\n\n" + "\n".join(status_lines) + "\n\n" + "\n\n".join(alerts)
     else:
