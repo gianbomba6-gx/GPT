@@ -4,7 +4,8 @@ on:
   workflow_dispatch:
   schedule:
     # GitHub Actions cron is UTC. We trigger all possible DST slots and
-    # execute the scanner only when the local market-clock check matches.
+    # execute the scanner only when the local market-clock check is within
+    # 15 minutes AFTER the intended market-close-minus-one-hour time.
     # Milan: 16:30 Europe/Rome (one hour before 17:30 close).
     # US:    15:00 America/New_York (one hour before 16:00 ET close).
     - cron: '30 14 * * 1-5'
@@ -30,23 +31,35 @@ jobs:
         id: market_time
         run: |
           python - <<'PY'
-          from datetime import datetime
+          from datetime import datetime, timedelta
           from zoneinfo import ZoneInfo
           import os
 
-          rome = datetime.now(ZoneInfo("Europe/Rome"))
-          ny = datetime.now(ZoneInfo("America/New_York"))
-          if rome.hour == 16 and rome.minute == 30:
+          now_rome = datetime.now(ZoneInfo("Europe/Rome"))
+          now_ny = datetime.now(ZoneInfo("America/New_York"))
+
+          target_rome = now_rome.replace(hour=16, minute=30, second=0, microsecond=0)
+          target_ny = now_ny.replace(hour=15, minute=0, second=0, microsecond=0)
+          tolerance = timedelta(minutes=15)
+
+          rome_delta = now_rome - target_rome
+          ny_delta = now_ny - target_ny
+
+          if timedelta(0) <= rome_delta <= tolerance:
               market = "MILAN"
-          elif ny.hour == 15 and ny.minute == 0:
+          elif timedelta(0) <= ny_delta <= tolerance:
               market = "US"
           else:
               market = ""
+
           run_scan = bool(market)
-          print(f"Europe/Rome={rome.isoformat()}")
-          print(f"America/New_York={ny.isoformat()}")
+          print(f"Europe/Rome={now_rome.isoformat()}")
+          print(f"America/New_York={now_ny.isoformat()}")
+          print(f"Milan target={target_rome.isoformat()} delta={rome_delta}")
+          print(f"US target={target_ny.isoformat()} delta={ny_delta}")
           print(f"RUN_SCAN={str(run_scan).lower()}")
           print(f"SCAN_MARKET={market or 'NONE'}")
+
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
               f.write(f"run_scan={'true' if run_scan else 'false'}\n")
               f.write(f"scan_market={market}\n")
@@ -60,4 +73,4 @@ jobs:
         run: python live_alert.py
       - name: Skip non-market slot
         if: steps.market_time.outputs.run_scan != 'true'
-        run: echo "Cron slot not aligned with a market-close-minus-one-hour trigger; no scan executed."
+        run: echo "Cron slot is not within 15 minutes after a market-close-minus-one-hour trigger; no scan executed."
