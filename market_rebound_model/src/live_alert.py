@@ -165,10 +165,19 @@ def main() -> int:
         latest["probability"] = float(model.predict_proba(pd.DataFrame([latest])[FEATURES])[:, 1][0])
         predictions[symbol] = latest
 
+    # A Milan report monitors Milan-listed equities; a US report monitors US equities.
+    if scan_market in {"MILAN", "US"}:
+        items_to_report = [
+            item for item in CONFIG["tickers"]
+            if item["type"] != "benchmark"
+            and ((scan_market == "MILAN" and item.get("market") == "Milan")
+                 or (scan_market == "US" and item.get("market") == "US"))
+        ]
+    else:
+        items_to_report = [item for item in CONFIG["tickers"] if item["type"] != "benchmark"]
+
     status_lines = []
-    for item in CONFIG["tickers"]:
-        if item["type"] == "benchmark":
-            continue
+    for item in items_to_report:
         symbol = item["symbol"]
         if symbol not in predictions:
             status_lines.append(f"⚠️ {symbol}: dati insufficienti")
